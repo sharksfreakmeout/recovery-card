@@ -18,6 +18,7 @@ Stop: Ctrl-C
 import json
 import os
 import re
+import signal
 import struct
 import subprocess
 import sys
@@ -27,6 +28,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 CAPTURES = ROOT / "captures"
+# app.py reads this to drive the live state panel.
+STATUS = CAPTURES / "status.json"
 
 # --- Tunables (override with environment variables) -----------------------
 CAPTURE_INTERVAL = float(os.environ.get("CAPTURE_INTERVAL", 10))
@@ -38,12 +41,44 @@ DIFF_THRESHOLD = float(os.environ.get("DIFF_THRESHOLD", 1.5))
 
 THUMB_PX = 32  # fingerprint width; small enough that a blinking cursor vanishes
 
+# Seconds of no input before we call it AWAY rather than ACTIVE.
+AWAY_AFTER = float(os.environ.get("AWAY_AFTER", 5))
+
 # Only files matching this are ever pruned. Nothing else is touched, ever.
 FRAME_RE = re.compile(r"^frame_\d{8}_\d{6}\.(png|json)$")
+
+# Live state, mirrored to STATUS for app.py.
+STATE = {
+    "mode": "STARTING",
+    "pid": os.getpid(),
+    "frames_kept": 0,
+    "frames_skipped": 0,
+    "idle_seconds": 0.0,
+    "last_capture": None,
+    "last_frame": None,
+    "card_started_at": None,
+    "idle_threshold": IDLE_THRESHOLD,
+    "capture_interval": CAPTURE_INTERVAL,
+}
 
 
 def log(msg):
     print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
+
+
+def write_status(mode=None, **fields):
+    """Mirror current state to captures/status.json for the UI."""
+    if mode:
+        STATE["mode"] = mode
+    STATE.update(fields)
+    STATE["updated_at"] = time.time()
+    try:
+        CAPTURES.mkdir(exist_ok=True)
+        tmp = STATUS.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(STATE, indent=2))
+        tmp.replace(STATUS)  # atomic, so app.py never reads a half-written file
+    except Exception:
+        pass  # the UI is a nicety; never let it kill capture
 
 
 # --- Screen capture -------------------------------------------------------
@@ -209,13 +244,22 @@ def main():
         cycle_start = time.time()
 
         idle = idle_seconds()
+        STATE["idle_seconds"] = round(idle, 1)
+
         if idle >= IDLE_THRESHOLD and not card_fired:
             log(f"Idle for {idle:.0f}s - you stepped away.")
+            write_status("RECONSTRUCTING", card_started_at=time.time())
             generate_card(f"idle {idle:.0f}s")
             card_fired = True
-        elif idle < 5 and card_fired:
+            write_status("CARD_READY", card_started_at=None)
+        elif idle < AWAY_AFTER and card_fired:
             log("Welcome back. Re-arming the idle trigger.")
             card_fired = False
+            write_status("ACTIVE")
+        elif card_fired:
+            write_status("CARD_READY")
+        else:
+            write_status("AWAY" if idle >= AWAY_AFTER else "ACTIVE")
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         tmp = CAPTURES / f"pending_{stamp}.png"
@@ -233,6 +277,7 @@ def main():
         if prev_fp is not None and dist < DIFF_THRESHOLD:
             tmp.unlink(missing_ok=True)
             skipped += 1
+            write_status(frames_skipped=skipped)
             log(f"skip  (diff {dist:.2f} - screen unchanged)   "
                 f"kept={kept} skipped={skipped}")
         else:
@@ -247,6 +292,8 @@ def main():
 
             prev_fp = fp
             kept += 1
+            write_status(frames_kept=kept, last_frame=final.name,
+                         last_capture=ctx["timestamp"])
             title = ctx["window_title"] or "(untitled window)"
             log(f"KEEP  {final.name}  diff={dist:.2f}  "
                 f"{ctx['app']} - {title[:50]}")
@@ -256,8 +303,17 @@ def main():
         time.sleep(max(0.0, CAPTURE_INTERVAL - elapsed))
 
 
+def _on_terminate(signum, frame):
+    """app.py stops capture with SIGTERM; leave the status file truthful."""
+    log("Capture stopped (terminated).")
+    write_status("STOPPED")
+    sys.exit(0)
+
+
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _on_terminate)
     try:
         main()
     except KeyboardInterrupt:
         log("Capture stopped.")
+        write_status("STOPPED")
