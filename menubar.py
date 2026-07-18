@@ -31,15 +31,11 @@ PYTHON = str(VENV_PY if VENV_PY.exists() else sys.executable)
 
 POLL_SECONDS = 2
 
-# Menu bar titles. Short, because this sits next to the clock all day.
-GLYPH = {
-    "STOPPED": "○",
-    "STARTING": "○",
-    "ACTIVE": "●",
-    "AWAY": "◐",
-    "RECONSTRUCTING": "◍",
-    "CARD_READY": "◉",
-}
+# The bone is the mark. Kept deliberately narrow: on a notched MacBook a
+# full menu bar pushes new status items into the dead zone behind the
+# notch, where they are invisible with no error. Every character costs
+# space, so the suffix only appears when it is telling you something.
+BONE = "🦴"
 
 
 def api(path, method="GET", payload=None, timeout=6):
@@ -67,7 +63,7 @@ def truncate(s, n):
 
 class RecoveryCard(rumps.App):
     def __init__(self):
-        super().__init__("○", quit_button=None)
+        super().__init__(BONE, quit_button=None)
 
         self.backend = None
         self.window_proc = None
@@ -141,33 +137,32 @@ class RecoveryCard(rumps.App):
         try:
             s = api("/api/state")
         except Exception:
-            self.title = "○"
+            self.title = BONE
             self.item_state.title = "Backend not running"
             self.item_capture.title = "Start capture"
             return
 
         mode = s.get("mode", "STOPPED")
-        glyph = GLYPH.get(mode, "○")
 
         if mode == "ACTIVE":
-            self.title = f"{glyph}"
+            self.title = BONE
             self.item_state.title = (
                 f"Watching · {s['frames_kept']} frames kept")
         elif mode == "AWAY":
             secs = int(s.get("idle_seconds", 0))
-            self.title = f"{glyph} {secs}s"
+            self.title = f"{BONE} {secs}s"
             self.item_state.title = (
                 f"Away {secs}s · card fires at "
                 f"{int(s.get('idle_threshold', 60))}s")
         elif mode == "RECONSTRUCTING":
-            self.title = f"{glyph}"
+            self.title = f"{BONE} …"
             self.item_state.title = (
                 f"Reconstructing… {s.get('reconstructing_for') or 0}s")
         elif mode == "CARD_READY":
-            self.title = f"{glyph}"
+            self.title = f"{BONE} ●"
             self.item_state.title = "Card ready"
         else:
-            self.title = glyph
+            self.title = BONE
             self.item_state.title = "Not capturing"
 
         self.item_capture.title = (
