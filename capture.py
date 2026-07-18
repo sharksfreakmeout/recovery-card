@@ -198,8 +198,11 @@ def generate_card(reason: str):
         return
     log(f"  -> generating card ({reason})...")
     try:
+        env = dict(os.environ)
+        env["RECOVERY_TRIGGER"] = "idle"  # stamped into the card as provenance
         r = subprocess.run([sys.executable, str(card)],
-                           capture_output=True, text=True, timeout=300)
+                           capture_output=True, text=True, timeout=300,
+                           env=env)
         if r.returncode == 0:
             log("  -> card generated.")
         else:

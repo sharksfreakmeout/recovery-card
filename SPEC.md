@@ -56,6 +56,37 @@ supplies voice).
 **Preflight on startup.** Ollama reachable, model present, test screenshot
 contains real content. Plain-English fixes if not.
 
+**Port.** `localhost:5001` by default, pinned so the demo URL is
+deterministic (macOS AirPlay Receiver owns 5000 and will answer requests
+there with a 403 even when Flask appears to have started). `PORT` overrides.
+If the port is busy the app steps to the next free one and prints a loud
+warning naming the port actually in use.
+
+### Stage 3b — Native macOS surface
+
+Recovery Card is an ambient background utility, so its primary surface is
+the OS, not a browser tab. The Flask service above becomes the local
+backend; the native layer is a thin client over its tested API and adds no
+capture, inference, or state logic of its own.
+
+- **`menubar.py`** — menu bar app (`rumps`). A glyph shows state at a glance
+  (`●` watching, `◐ 42s` away, `◍` reconstructing, `◉` card ready). The menu
+  carries the state line, Start/Stop capture, Park it…, the current card's
+  goal and next step, and Open card window. A native notification fires when
+  a card lands.
+- **`window.py`** — the full card in a real macOS window (`pywebview`,
+  WKWebView, no browser chrome, own Dock icon). Runs as its own process
+  because the menu bar and the window cannot share the macOS main thread.
+- **Fallback.** `app.py` alone in a browser remains fully functional and is
+  never removed. If the native layer fails, the demo still runs.
+
+### Card provenance
+
+Every card records `trigger`: `idle` (the automatic watcher fired), `im_back`
+(the button), `menubar`, or `cli`. Without it there is no way to prove after
+the fact that the automatic chain actually ran, which is the single most
+important claim this project makes.
+
 ### `eval.py`
 - Park notes double as ground truth.
 - Show each card/truth pair, let the user mark correct or incorrect, print a running tally like "8/10".

@@ -297,6 +297,7 @@ def api_generate():
     if _generating_since is not None:
         return jsonify({"ok": False, "note": "already generating"})
     _generating_since = time.time()
+    os.environ["RECOVERY_TRIGGER"] = "im_back"  # provenance, see card.py
     try:
         card_mod.generate()
         return jsonify({"ok": True})
@@ -304,6 +305,7 @@ def api_generate():
         return jsonify({"ok": False, "error": str(e)}), 500
     finally:
         _generating_since = None
+        os.environ.pop("RECOVERY_TRIGGER", None)
 
 
 @app.route("/api/park", methods=["POST"])
@@ -563,7 +565,8 @@ function renderCard(c) {
       ${loops ? `<div class="sec"><h2>OPEN LOOPS</h2><ul>${loops}</ul></div>` : ""}
       ${c.park_note ? `<div class="said">You said: “${esc(c.park_note)}”</div>` : ""}
       <div class="meta">
-        confidence ${esc(c.confidence)} · ${esc(c.model || "")}<br>
+        confidence ${esc(c.confidence)} · ${esc(c.model || "")}
+        ${c.trigger ? "· triggered by " + esc(c.trigger) : ""}<br>
         evidence: ${esc(c.evidence)}
       </div>
     </div>`;

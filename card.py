@@ -319,6 +319,10 @@ def generate():
 
     card["generated_at"] = datetime.now().isoformat(timespec="seconds")
     card["frames_used"] = [f.name for f, _ in frames]
+    # Who asked for this card: the idle watcher, the "I'm back" button, the
+    # menu bar, or a bare command line. Without this you cannot tell after
+    # the fact whether the automatic chain actually fired.
+    card["trigger"] = os.environ.get("RECOVERY_TRIGGER", "cli")
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = CARDS / f"card_{stamp}.json"

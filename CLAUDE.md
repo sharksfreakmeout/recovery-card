@@ -7,7 +7,10 @@
 1. **100% local at runtime.** Model `gemma4:12b-it-qat` via Ollama at `localhost:11434`, fallback `gemma4:e2b-it-qat`. Never any cloud API, hosted model, or network call. Disqualification risk.
 2. **One milestone at a time**, wait for my confirmation.
 3. **Commit every working milestone** with a clear message and push.
-4. **Python 3 + Flask only.** No databases.
+4. **Python 3.** No databases. The interface is a native macOS app (menu bar
+   via `rumps`, native window via `pywebview`) backed by a local Flask
+   service. Flask alone at `localhost:5001` remains a working fallback and is
+   never deleted.
 5. **On errors:** diagnose in plain English, fix, give me one verify command.
 6. **Never delete files, install system-wide software, or run destructive git commands** without asking me.
 
