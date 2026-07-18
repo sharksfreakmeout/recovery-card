@@ -183,23 +183,37 @@ def frame_distance(a, b) -> float:
 # "looking at their Recovery Card" and lifts instructions from the card's
 # own text as the next action - the system watching itself in a mirror.
 
-_SELF_TITLES = ("recovery card", "plite", "rehearsal")
+# Our exact window identities. A Claude conversation TITLED "PLite ..."
+# or a doc about Recovery Card is the user's real work - only our own
+# processes and our own served pages are self.
+_SELF_EXACT = {"recovery card", "rehearsal", "plite — welcome",
+               "plite — thread", "plite"}
 
 
 def is_self_surface(ctx):
-    """Is the frontmost window one of ours?
+    """Is the frontmost window actually OURS?
 
-    Matches our native windows (overlay/window/banner run as Python with
-    our titles) and the board/engine/trust/map pages open in any browser
-    tab. Deliberately matches on OUR title strings only - a user's editor
-    open on this repo is their real work, not a mirror.
+    Native: our windows run as Python with exact titles. Browser: our
+    pages served from localhost - the tab title alone is not enough,
+    because any app can hold a conversation or document about PLite.
     """
-    title = (ctx.get("window_title") or "").lower()
-    tab = ((ctx.get("ax") or {}).get("tab") or "").lower()
-    for t in (title, tab):
-        if any(t.startswith(s) or f"{s} —" in t or f"{s} -" in t
-               for s in _SELF_TITLES):
-            return True
+    app = ctx.get("app") or ""
+    title = (ctx.get("window_title") or "").strip().lower()
+    ax = ctx.get("ax") or {}
+    tab = (ax.get("tab") or "").strip().lower()
+    url = (ax.get("url") or "").lower()
+
+    if app == "Python" and title in _SELF_EXACT:
+        return True
+    # our served pages: only when the URL proves it is our origin
+    if url and ("localhost:5001" in url or "127.0.0.1:5001" in url):
+        return True
+    # browser tab with our exact page titles, URL unavailable: match the
+    # exact serve titles only (never prefixes - "PLite capture stall" is
+    # a conversation, not a surface)
+    if tab in ("recovery card", "plite — welcome", "plite — thread",
+               "recovery card — welcome", "plite — what it sees"):
+        return True
     return False
 
 
@@ -250,6 +264,19 @@ def engagement_snapshot():
 
 def is_engaged(snap):
     return snap.get("doing") in ("typing", "clicking", "scrolling")
+
+
+def skip_reason(unchanged, snap, app_switched, landed_waiting):
+    """Why a frame would be skipped, or None to keep it.
+
+    TYPING ALWAYS KEEPS: sustained typing in one window changes few
+    pixels, and those are the most valuable frames there are.
+    """
+    if unchanged and snap.get("doing") != "typing":
+        return "unchanged"
+    if app_switched and not is_engaged(snap) and not landed_waiting:
+        return "hold"
+    return None
 
 
 # --- Clipboard (consent by design) -----------------------------------------
@@ -531,15 +558,24 @@ def generate_card(reason: str, trigger="idle", away=None):
         if away:
             env["RECOVERY_AWAY_MODE"] = away.get("mode", "")
             env["RECOVERY_AWAY_SECONDS"] = str(int(away.get("seconds", 0)))
-        r = subprocess.run([sys.executable, str(card)],
-                           capture_output=True, text=True, timeout=300,
-                           env=env)
-        if r.returncode == 0:
+        p = subprocess.Popen([sys.executable, str(card)],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.PIPE, env=env)
+        t0 = time.time()
+        while p.poll() is None:
+            if time.time() - t0 > 300:
+                p.kill()
+                log("  -> card generation timed out after 5 minutes.")
+                return
+            write_status(beat=time.time())   # the loop is NOT dead
+            time.sleep(2)
+        if p.returncode == 0:
             log("  -> card generated.")
         else:
-            log(f"  -> card generation failed: {r.stderr.strip()[:200]}")
-    except subprocess.TimeoutExpired:
-        log("  -> card generation timed out after 5 minutes.")
+            err = (p.stderr.read() or b"").decode()[:200]
+            log(f"  -> card generation failed: {err}")
+    except Exception as e:
+        log(f"  -> card generation failed: {e}")
 
 
 # --- Retention ------------------------------------------------------------
@@ -653,6 +689,10 @@ def main():
 
         idle = idle_seconds()
         STATE["idle_seconds"] = round(idle, 1)
+        # Heartbeat: proves the LOOP is alive, not merely that a process
+        # exists. The engine treats a stale beat as a stall, whatever the
+        # process table says (a SIGSTOPPED corpse still shows "alive").
+        write_status(beat=time.time())
 
         if idle >= IDLE_THRESHOLD and not card_fired:
             log(f"Idle for {idle:.0f}s - you stepped away.")
@@ -787,13 +827,17 @@ def main():
         #    gets kept then. Switches never followed by engagement are never
         #    kept at all.
         unchanged = prev_fp is not None and dist < DIFF_THRESHOLD
-        if unchanged and snap.get("doing") != "typing":
+        reason = skip_reason(unchanged, snap, app_switched, landed_waiting)
+        if reason == "unchanged":
             tmp.unlink(missing_ok=True)
             skipped += 1
+            STATE.setdefault("skip_reasons", {})
+            STATE["skip_reasons"]["unchanged"] = \
+                STATE["skip_reasons"].get("unchanged", 0) + 1
             write_status(frames_skipped=skipped)
             log(f"skip  (diff {dist:.2f} - unchanged, {snap.get('doing', '?')})"
                 f"   kept={kept} skipped={skipped}")
-        elif app_switched and not is_engaged(snap) and not landed_waiting:
+        elif reason == "hold":
             landed_waiting = True
             tmp.unlink(missing_ok=True)
             skipped += 1
@@ -906,7 +950,8 @@ def main():
             # spec of 20.
             on_disk = len(list(CAPTURES.glob("frame_*.png")))
             write_status(frames_kept=on_disk, last_frame=final.name,
-                         last_capture=ctx["timestamp"])
+                         last_capture=ctx["timestamp"],
+                         last_kept_at=time.time())
             title = ctx["window_title"] or "(untitled window)"
             log(f"KEEP  {final.name}  diff={dist:.2f}  "
                 f"{ctx['app']} ({snap.get('doing', '?')}) - {title[:44]}")
@@ -922,8 +967,34 @@ def _on_terminate(signum, frame):
     sys.exit(0)
 
 
+def claim_live_instance():
+    """One live capture, ever. A predecessor in T state (suspended - e.g.
+    by a dead test) is a corpse wearing a green dot: kill it and take
+    over. A running one wins; we defer."""
+    if SANDBOX:
+        return True
+    pf = ROOT / ".capture.pid"
+    try:
+        old = int(pf.read_text().strip())
+        r = subprocess.run(["ps", "-o", "stat=", "-p", str(old)],
+                           capture_output=True, text=True)
+        st = r.stdout.strip()
+        if st.startswith("T"):
+            os.kill(old, signal.SIGKILL)
+            log(f"killed suspended predecessor capture (pid {old})")
+        elif st:
+            log(f"live capture already running (pid {old}) - deferring.")
+            return False
+    except Exception:
+        pass
+    pf.write_text(str(os.getpid()))
+    return True
+
+
 if __name__ == "__main__":
     refuse_unsandboxed_hooks()
+    if not claim_live_instance():
+        sys.exit(0)
     signal.signal(signal.SIGTERM, _on_terminate)
     try:
         main()

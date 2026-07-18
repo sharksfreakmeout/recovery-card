@@ -654,7 +654,9 @@ def generate():
         card["rehearsal"] = True  # fence: excluded from human tallies
     card["generated_at"] = datetime.now().isoformat(timespec="seconds")
     card["frames_used"] = [f.name for f, _ in frames]
-    # Temporal anchor: what slice of time this card actually saw.
+    # Temporal anchor: what slice of time this card actually saw - and
+    # LOUD staleness when that slice is old. A card from 14-minute-old
+    # frames must say so, prominently, not in fine print.
     try:
         stamps = sorted(datetime.strptime(f.name[6:21], "%Y%m%d_%H%M%S")
                         for f, _ in frames)
@@ -663,6 +665,9 @@ def generate():
                 "start": stamps[0].isoformat(timespec="seconds"),
                 "end": stamps[-1].isoformat(timespec="seconds"),
             }
+            age = (datetime.now() - stamps[-1]).total_seconds()
+            if age > 300:
+                card["stale_capture_minutes"] = int(age / 60)
     except Exception:
         pass
     # Who asked for this card: the idle watcher, the "I'm back" button, the

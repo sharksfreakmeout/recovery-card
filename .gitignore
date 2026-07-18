@@ -36,3 +36,4 @@ trust_settings.json
 .rehearsal_on
 .banner.pid
 private_apps.json
+.capture.pid

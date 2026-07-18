@@ -95,7 +95,38 @@ def read_status():
     # A status file left over from a dead process must not look alive.
     if s.get("mode") != "STOPPED" and not pid_alive(s.get("pid")):
         s["mode"] = "STOPPED"
+
+    # STATUS HONESTY: "watching" requires a live LOOP, not a live pid.
+    # A SIGSTOPPED corpse passes pid_alive; a loop stuck in a syscall
+    # passes too. The heartbeat is the truth.
+    beat = s.get("beat")
+    interval = float(s.get("capture_interval") or 10)
+    if s.get("mode") not in ("STOPPED",) and beat and \
+            time.time() - beat > max(30, interval * 3):
+        s["mode"] = "STALLED"
+        s["stall_seconds"] = int(time.time() - beat)
     return s
+
+
+def watch_note(s):
+    """Plain words when the green dot would otherwise lie.
+
+    Engaged user + nothing KEPT for 2 minutes = watching blind; say so
+    with the reason the system actually knows.
+    """
+    if s.get("mode") == "STALLED":
+        return (f"capture stalled {s.get('stall_seconds', '?')}s ago — "
+                "restart watching")
+    if s.get("mode") in ("STOPPED", "PAUSED", "PAUSED_PRIVATE"):
+        return ""
+    lk = s.get("last_kept_at")
+    if not lk or time.time() - lk < 120:
+        return ""
+    mins = int((time.time() - lk) / 60)
+    reasons = s.get("skip_reasons") or {}
+    why = "screen unchanged" if reasons.get("unchanged") else \
+        "no engaged moments to keep"
+    return f"nothing new kept for {mins}m — {why}"
 
 
 def pid_alive(pid):
@@ -896,6 +927,7 @@ def api_state():
         "last_card": human_time(c.get("generated_at")) if c else "never",
         "reconstructing_for": elapsed,
         "away_summary": st.get("away_summary", ""),
+        "watch_note": watch_note(st),
         "model": model or "none",
         "reduced_model": reduced,
         "network": "ONLINE" if network_up() else "OFFLINE",
@@ -2274,8 +2306,12 @@ async function tick() {
   const q = [];
   // Silent generation law: RECONSTRUCTING is background; here it is just
   // "watching" - a false idle-fire must cost nothing visible.
-  if (["ACTIVE", "AWAY", "RECONSTRUCTING"].includes(d.mode))
-    q.push(`<span><span class="beat"></span>watching · last capture ${esc(d.last_capture)}</span>`);
+  if (d.mode === "STALLED")
+    q.push(`<span class="off">${esc(d.watch_note)}</span>`);
+  else if (["ACTIVE", "AWAY", "RECONSTRUCTING"].includes(d.mode))
+    q.push(d.watch_note
+      ? `<span style="color:#e0af68">watching — ${esc(d.watch_note)}</span>`
+      : `<span><span class="beat"></span>watching · last capture ${esc(d.last_capture)}</span>`);
   else if (d.mode === "SUSPENDED") q.push(`<span>asleep — state saved</span>`);
   else if (d.mode === "PAUSED_PRIVATE") q.push(`<span>paused — a private app is in front</span>`);
   else if (d.mode === "CARD_READY") q.push(`<span>your card is ready</span>`);
@@ -3348,6 +3384,12 @@ function agoWords(iso) {
 function coverageLine(c) {
   if (!c || !c.coverage) return "";
   const a = fmtClock(c.coverage.start), b2 = fmtClock(c.coverage.end);
+  if (c.stale_capture_minutes)
+    return `<p class="awayline" style="font-weight:600">From your screen
+      ${c.stale_capture_minutes} minutes ago — nothing newer was
+      captured.</p>
+      <p class="coverage">${a === b2 ? a : a + "–" + b2}
+      · ${agoWords(c.generated_at)}</p>`;
   return `<p class="coverage">From your screen, ${a === b2 ? a :
     a + "–" + b2} · ${agoWords(c.generated_at)}</p>`;
 }

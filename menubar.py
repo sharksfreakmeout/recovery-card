@@ -222,7 +222,14 @@ class RecoveryCard(rumps.App):
 
         mode = s.get("mode", "STOPPED")
 
-        if mode == "ACTIVE":
+        note = s.get("watch_note") or ""
+        if mode == "STALLED":
+            self.title = f"{BONE} !"
+            self.item_state.title = "Capture stalled — restart watching"
+        elif mode == "ACTIVE" and note:
+            self.title = f"{BONE} ·"
+            self.item_state.title = f"Watching — {note}"
+        elif mode == "ACTIVE":
             self.title = BONE
             self.item_state.title = (
                 f"Watching · {s['frames_kept']} frames kept")

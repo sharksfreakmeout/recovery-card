@@ -383,7 +383,8 @@ def update_affinity(g, tid, meta):
                     key = host.removeprefix("www.")
                 except Exception:
                     key = None
-            if not key and meta.get("app") and meta["app"] != "hidden":
+            if not key and meta.get("app") and \
+                    meta["app"].lower() not in ("hidden", "unknown"):
                 key = meta["app"]
             if key:
                 agg = t.setdefault("sources_agg", {})

@@ -22,16 +22,21 @@ PORT = os.environ.get("PORT", "5001")
 def test_self_detection():
     import capture
     yes = [
-        {"window_title": "Recovery Card"},
-        {"window_title": "PLite — thread"},
-        {"window_title": "", "ax": {"tab": "Recovery Card"}},
-        {"window_title": "REHEARSAL"},
+        {"app": "Python", "window_title": "Recovery Card"},
+        {"app": "Python", "window_title": "PLite — thread"},
+        {"app": "Google Chrome", "window_title": "",
+         "ax": {"tab": "Recovery Card"}},
+        {"app": "Python", "window_title": "REHEARSAL"},
     ]
     no = [
-        {"window_title": "Gemma Hackathon"},              # our repo in an editor
-        {"window_title": "card.py — Gemma Hackathon"},    # editing our code
-        {"window_title": "Atlas Mobile — Q3 Launch PRD"},
-        {"window_title": "", "ax": {"tab": "Recovering deleted files"}},
+        {"app": "Cursor", "window_title": "Gemma Hackathon"},
+        {"app": "Cursor", "window_title": "card.py — Gemma Hackathon"},
+        {"app": "Notion", "window_title": "Atlas Mobile — Q3 Launch PRD"},
+        {"app": "Google Chrome", "window_title": "",
+         "ax": {"tab": "Recovering deleted files"}},
+        # identity, not topic: conversations/docs ABOUT PLite are work
+        {"app": "Claude", "window_title": "PLite capture stall"},
+        {"app": "TextEdit", "window_title": "Recovery Card notes"},
     ]
     for m in yes:
         assert capture.is_self_surface(m), f"should be self: {m}"
