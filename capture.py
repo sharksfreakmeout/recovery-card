@@ -430,6 +430,22 @@ def main():
         else:
             write_status("AWAY" if idle >= AWAY_AFTER else "ACTIVE")
 
+        # Trust switches are read live every cycle: flipping one off in the
+        # dashboard stops that mechanism within one interval, no restart.
+        # The frames check comes BEFORE the screenshot: off means the screen
+        # is never photographed at all, not photographed-then-discarded.
+        try:
+            import trust
+            switches = trust.read_settings()
+        except Exception:
+            switches = {}
+
+        if not switches.get("frames", True):
+            write_status("PAUSED")
+            log("frames switch is off - not capturing")
+            time.sleep(max(0.0, CAPTURE_INTERVAL - (time.time() - cycle_start)))
+            continue
+
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         tmp = CAPTURES / f"pending_{stamp}.png"
 
@@ -443,7 +459,8 @@ def main():
         fp = fingerprint(tmp)
         dist = frame_distance(prev_fp, fp)
         snap = engagement_snapshot()
-        ctx = window_context()
+        ctx = (window_context() if switches.get("titles", True)
+               else {"app": "hidden", "window_title": "", "window_titles": []})
         app_switched = prev_app is not None and ctx["app"] != prev_app
         prev_app = ctx["app"]
 
@@ -477,11 +494,14 @@ def main():
             ctx["frame"] = final.name
             ctx["diff_from_previous"] = round(dist, 2) if prev_fp else None
             ctx["engagement"] = snap
-            clip = clipboard_snippet()
-            if clip:
-                ctx["clipboard"] = clip
-            ctx["recent_files"] = recent_files()
-            ctx["ax"] = ax_context(ctx["app"])
+            if switches.get("clipboard", True):
+                clip = clipboard_snippet()
+                if clip:
+                    ctx["clipboard"] = clip
+            ctx["recent_files"] = (recent_files()
+                                   if switches.get("files", True) else [])
+            ctx["ax"] = (ax_context(ctx["app"])
+                         if switches.get("ax", True) else {})
             final.with_suffix(".json").write_text(json.dumps(ctx, indent=2))
 
             # Continuous cheap classification -> live thread affinity.

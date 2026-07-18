@@ -12,6 +12,7 @@ Run:  .venv/bin/python app.py
 
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -26,6 +27,7 @@ import capture
 import card as card_mod
 import eval as eval_mod
 import threads as threads_mod
+import trust as trust_mod
 
 ROOT = Path(__file__).resolve().parent
 CAPTURES = ROOT / "captures"
@@ -299,6 +301,75 @@ def api_dismiss_emergent():
         u["engaged"] = False  # no longer counts toward a proposal
     threads_mod.save(g)
     return jsonify({"ok": True})
+
+
+# --- Trust dashboard API ---------------------------------------------------
+# Contract: everything here is read live from the real files on disk when
+# the request arrives. No cached claims. Every control is real.
+
+@app.route("/trust")
+def trust_page():
+    return render_template_string(TRUST_PAGE)
+
+
+@app.route("/api/trust")
+def api_trust():
+    model, reduced = current_model()
+    return jsonify({
+        "switches": trust_mod.read_settings(),
+        "switch_names": trust_mod.SWITCHES,
+        "data": trust_mod.data_on_hand(),
+        "network": "ONLINE" if network_up() else "OFFLINE",
+        "model": model or "none",
+        "refusals": [
+            "Concealed clipboard content (password managers) is never captured.",
+            "No microphone. No ambient audio. Ever.",
+            "Nothing is uploaded. The only network call this app makes is to "
+            "the local model on this Mac.",
+        ],
+    })
+
+
+@app.route("/api/trust/toggle", methods=["POST"])
+def api_trust_toggle():
+    body = request.json or {}
+    name = body.get("switch", "")
+    try:
+        s = trust_mod.set_switch(name, bool(body.get("value")))
+        return jsonify({"ok": True, "switches": s})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/trust/delete", methods=["POST"])
+def api_trust_delete():
+    body = request.json or {}
+    scope = body.get("scope", "")
+    if scope == "thread":
+        ok = trust_mod.forget_thread(body.get("id", ""))
+        return jsonify({"ok": ok})
+    if scope == "captures":
+        return jsonify({"ok": True, "deleted": trust_mod.delete_captures()})
+    if scope == "everything":
+        return jsonify({"ok": True, "deleted": trust_mod.delete_everything()})
+    return jsonify({"ok": False, "error": "unknown scope"}), 400
+
+
+@app.route("/captures/<name>")
+def serve_capture(name):
+    """The actual screenshots, viewable from the dashboard. Local only."""
+    from flask import send_from_directory, abort
+    if not re.match(r"^frame_\d{8}_\d{6}\.(png|json)$", name):
+        abort(404)
+    return send_from_directory(CAPTURES, name)
+
+
+@app.route("/cards/<name>")
+def serve_card(name):
+    from flask import send_from_directory, abort
+    if not re.match(r"^card_\d{8}_\d{6}\.json$", name):
+        abort(404)
+    return send_from_directory(CARDS, name)
 
 
 # --- Onboarding API -------------------------------------------------------
@@ -1580,7 +1651,9 @@ BOARD_PAGE = r"""
 
   <div class="scoring" id="scoring" style="margin-top:18px"></div>
 
-  <p style="margin-top:40px"><a class="engine" href="/engine">engine room</a></p>
+  <p style="margin-top:40px">
+    <a class="engine" href="/trust">what it sees</a> ·
+    <a class="engine" href="/engine">engine room</a></p>
 </div>
 <script>
 function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
@@ -1898,6 +1971,242 @@ setInterval(drawScoring, 6000);
 """
 
 BOARD_PAGE = BOARD_PAGE + _CARD_ASSETS
+
+
+TRUST_PAGE = r"""
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Recovery Card — what it sees</title>
+<style>
+""" + _BASE_CSS + r"""
+  .panel { background:var(--panel); border:1px solid var(--line);
+           border-radius:14px; padding:20px 24px; margin-bottom:16px; }
+  .panel h2 { font-size:11px; letter-spacing:.14em; color:var(--dim);
+              font-weight:600; margin:0 0 14px; }
+  .switch-row { display:flex; align-items:center; gap:14px; padding:11px 0;
+                border-bottom:1px solid var(--line); }
+  .switch-row:last-child { border-bottom:none; }
+  .switch-row .name { flex:1; font-size:15px; }
+  .switch-row .state { font-size:12px; color:var(--dim); width:130px; }
+  .toggle { width:44px; height:26px; border-radius:13px; border:none;
+            cursor:pointer; position:relative; background:var(--line);
+            transition:background .25s ease; flex:none; padding:0; }
+  .toggle.on { background:var(--good); }
+  .toggle::after { content:""; position:absolute; top:3px; left:3px;
+                   width:20px; height:20px; border-radius:50%; background:#fff;
+                   transition:transform .25s ease; }
+  .toggle.on::after { transform:translateX(18px); }
+
+  .count-row { display:flex; gap:12px; flex-wrap:wrap; }
+  .count { flex:1; min-width:140px; text-align:left; padding:16px 18px;
+           border:1px solid var(--line); border-radius:12px; cursor:pointer;
+           background:transparent; color:var(--text); }
+  .count b { display:block; font-size:26px; font-weight:500; }
+  .count span { font-size:12.5px; color:var(--dim); }
+  .count:hover { border-color:var(--accent); }
+  .drill { margin-top:14px; font-size:13px; }
+  .drill img { max-width:100%; border-radius:10px; border:1px solid var(--line);
+               margin-top:8px; }
+  .drill .item { padding:7px 0; border-bottom:1px solid var(--line);
+                 display:flex; gap:10px; align-items:center; }
+  .drill .item:last-child { border-bottom:none; }
+  .drill a { color:var(--accent); text-decoration:none; cursor:pointer; }
+  .note { font-size:12.5px; color:var(--dim); margin-top:10px; }
+
+  .danger { border-color:rgba(247,118,142,.35); }
+  .danger button.del { border-color:rgba(247,118,142,.5); color:var(--bad); }
+  .danger button.del:hover { background:rgba(247,118,142,.1); }
+  .confirm { margin-top:10px; padding:12px 16px; border-radius:10px;
+             background:rgba(247,118,142,.08); font-size:13.5px; }
+  .confirm .row { display:flex; gap:8px; margin-top:10px; }
+
+  .proof { display:flex; flex-direction:column; gap:8px; font-size:13.5px; }
+  .proof .line { display:flex; gap:10px; align-items:baseline; }
+  .proof .dot { width:8px; height:8px; border-radius:50%;
+                background:var(--good); flex:none; }
+  .back-link { color:var(--dim); text-decoration:none; font-size:13.5px; }
+  .back-link:hover { color:var(--text); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p><a class="back-link" href="/">‹ Back to your threads</a></p>
+  <h1>What it sees</h1>
+  <p class="sub">Every mechanism, every piece of data on hand, and the
+  controls to stop or delete any of it. Read live from this Mac — nothing
+  here is a cached claim.</p>
+
+  <div class="panel">
+    <h2>WHAT'S BEING CAPTURED</h2>
+    <div id="switches"></div>
+    <p class="note">Flipping a switch off stops that mechanism within one
+    capture cycle. It stays off until you turn it back on.</p>
+  </div>
+
+  <div class="panel">
+    <h2>DATA ON HAND</h2>
+    <div class="count-row" id="counts"></div>
+    <div class="drill" id="drill"></div>
+    <p class="note">Frames are a rolling window: the newest 20 distinct
+    screenshots are kept and older ones are deleted as new ones arrive.</p>
+  </div>
+
+  <div class="panel danger">
+    <h2>DELETE</h2>
+    <div class="count-row">
+      <button class="del" onclick="askDelete('captures')">Delete all captures</button>
+      <button class="del" onclick="askDelete('thread')">Forget a thread</button>
+      <button class="del" onclick="askDelete('everything')">Delete everything</button>
+    </div>
+    <div id="confirm"></div>
+  </div>
+
+  <div class="panel">
+    <h2>ALWAYS TRUE</h2>
+    <div class="proof" id="proof"></div>
+  </div>
+</div>
+<script>
+function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+let trust = null;
+let drillOpen = null;
+
+async function load() {
+  try { trust = await (await fetch("/api/trust")).json(); } catch(e){ return; }
+
+  document.getElementById("switches").innerHTML =
+    Object.entries(trust.switch_names).map(([k, label]) => {
+      const on = trust.switches[k];
+      return `<div class="switch-row">
+        <div class="name">${esc(label)}</div>
+        <div class="state">${on ? "capturing" : "off — not captured"}</div>
+        <button class="toggle ${on ? "on" : ""}" onclick="flip('${k}')"
+                aria-label="${esc(label)}: ${on ? "on" : "off"}"></button>
+      </div>`;
+    }).join("");
+
+  const d = trust.data;
+  document.getElementById("counts").innerHTML = `
+    <button class="count" onclick="drill('frames')"><b>${d.frames}</b>
+      <span>screenshots held (rolling)</span></button>
+    <button class="count" onclick="drill('cards')"><b>${d.cards}</b>
+      <span>cards</span></button>
+    <button class="count" onclick="drill('threads')"><b>${d.threads}</b>
+      <span>threads</span></button>`;
+
+  document.getElementById("proof").innerHTML =
+    `<div class="line"><span class="dot"></span>
+       Network: <b>${trust.network === "OFFLINE"
+         ? "offline — fully on-device"
+         : "online, and still fully on-device"}</b></div>
+     <div class="line"><span class="dot"></span>
+       Model: <b>${esc(trust.model)}</b>, running on this Mac</div>` +
+    trust.refusals.map(r =>
+      `<div class="line"><span class="dot"></span>${esc(r)}</div>`).join("");
+
+  if (drillOpen) renderDrill();
+}
+
+async function flip(k) {
+  await fetch("/api/trust/toggle", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({switch:k, value:!trust.switches[k]})});
+  load();
+}
+
+function drill(kind) {
+  drillOpen = drillOpen === kind ? null : kind;
+  renderDrill();
+}
+
+function renderDrill() {
+  const host = document.getElementById("drill");
+  const d = trust.data;
+  if (!drillOpen) { host.innerHTML = ""; return; }
+  if (drillOpen === "frames") {
+    host.innerHTML = d.frame_files.length
+      ? d.frame_files.slice().reverse().map(f =>
+          `<div class="item"><a onclick="showFrame('${f}')">${f}</a></div>`
+        ).join("") + `<div id="frame-view"></div>`
+      : `<div class="note">No screenshots on hand.</div>`;
+  } else if (drillOpen === "cards") {
+    host.innerHTML = d.card_files.length
+      ? d.card_files.slice().reverse().map(f =>
+          `<div class="item"><a href="/cards/${f}" target="_blank">${f}</a></div>`
+        ).join("")
+      : `<div class="note">No cards yet.</div>`;
+  } else if (drillOpen === "threads") {
+    host.innerHTML = d.thread_list.length
+      ? d.thread_list.map(t =>
+          `<div class="item"><span style="flex:1">${esc(t.name)}</span>
+           <a onclick="askForget('${t.id}', '${esc(t.name)}')">forget</a></div>`
+        ).join("")
+      : `<div class="note">No threads yet.</div>`;
+  }
+}
+
+function showFrame(f) {
+  document.getElementById("frame-view").innerHTML =
+    `<img src="/captures/${f}" alt="screenshot ${f}">`;
+}
+
+function askDelete(scope) {
+  const host = document.getElementById("confirm");
+  const words = {
+    captures: "Delete every screenshot currently held? The rolling window "
+      + "starts empty again. This is immediate and cannot be undone.",
+    thread: "Pick the thread to forget from the list under “threads” above "
+      + "(click the count, then “forget” next to its name).",
+    everything: "Delete every screenshot, every card, every thread and all "
+      + "scoring data? Your on/off switches stay as you set them. This is "
+      + "immediate and cannot be undone.",
+  };
+  if (scope === "thread") {
+    host.innerHTML = `<div class="confirm">${words[scope]}</div>`;
+    drillOpen = "threads"; renderDrill();
+    return;
+  }
+  host.innerHTML = `<div class="confirm">${words[scope]}
+    <div class="row">
+      <button class="del" onclick="doDelete('${scope}')">Yes, delete</button>
+      <button onclick="document.getElementById('confirm').innerHTML=''">Keep it</button>
+    </div></div>`;
+}
+
+function askForget(id, name) {
+  document.getElementById("confirm").innerHTML = `<div class="confirm">
+    Forget “${name}”? Its return-point and history go with it. Immediate,
+    cannot be undone.
+    <div class="row">
+      <button class="del" onclick="doForget('${id}')">Yes, forget it</button>
+      <button onclick="document.getElementById('confirm').innerHTML=''">Keep it</button>
+    </div></div>`;
+}
+
+async function doDelete(scope) {
+  await fetch("/api/trust/delete", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({scope})});
+  document.getElementById("confirm").innerHTML = "";
+  drillOpen = null;
+  load();
+}
+async function doForget(id) {
+  await fetch("/api/trust/delete", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({scope:"thread", id})});
+  document.getElementById("confirm").innerHTML = "";
+  load();
+}
+
+load();
+setInterval(load, 3000);
+</script>
+</body>
+</html>
+"""
 
 
 OVERLAY_PAGE = r"""
