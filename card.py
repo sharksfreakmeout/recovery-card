@@ -155,8 +155,66 @@ def read_corrections():
     return [c for c in log if c.get("text", "").strip()][-CORRECTION_MEMORY:]
 
 
-def build_prompt(frames, park, corrections=None):
+def thread_context():
+    """Everything the thread graph knows that should shape this card.
+
+    Returns (graph, active_thread_dict_or_None, parked_list, emergent, memory).
+    Import is guarded: if thread intelligence fails, cards still generate
+    the old way. Healing runs here because card time is when hindsight
+    exists.
+    """
+    try:
+        import threads as T
+    except Exception:
+        return None, None, [], None, []
+    g = T.load()
+    healed = T.heal(g)
+    if healed:
+        log(f"healed {healed} previously-ambiguous frame(s) into threads")
+
+    active_tid = g["meta"].get("active_thread")
+    active = g["threads"].get(active_tid)
+    parked = [
+        {"name": t["name"], "return_point": t.get("return_point", ""),
+         "last_seen": t.get("last_seen", "")}
+        for tid, t in g["threads"].items()
+        if tid != active_tid and t.get("status") != "ambient"
+    ]
+    emergent = T.emergent_candidate(g)
+    memory = []
+    if active:
+        memory = T.retrieve(g, active_tid,
+                            active.get("return_point") or active["name"], k=4)
+    T.save(g)
+    return g, active, parked, emergent, memory
+
+
+def build_prompt(frames, park, corrections=None, active=None, parked=None,
+                 memory=None):
     lines = []
+
+    if active:
+        lines += [
+            f'THE ACTIVE THREAD OF WORK IS: "{active["name"]}"',
+            (f'  Its last known return-point: {active["return_point"]}'
+             if active.get("return_point") else ""),
+            "",
+        ]
+        if memory:
+            lines.append("WHAT THIS THREAD'S OWN HISTORY SAYS (most relevant "
+                         "first):")
+            for m in memory:
+                lines.append(f'  - ({m["kind"]}) {m["text"]}')
+            lines.append("")
+        lines = [l for l in lines if l != ""] + [""]
+
+    if parked:
+        lines.append("OTHER THREADS THE PERSON IS HOLDING (do not confuse "
+                     "them with the active one):")
+        for p in parked[:6]:
+            rp = f' - return-point: {p["return_point"]}' if p["return_point"] else ""
+            lines.append(f'  - {p["name"]}{rp}')
+        lines.append("")
 
     if corrections:
         lines.append("THE PERSON HAS ALREADY CORRECTED EARLIER CARDS:")
@@ -203,8 +261,11 @@ def build_prompt(frames, park, corrections=None):
         "",
         "  goal        - what they were trying to accomplish, one sentence",
         "  reasoning   - why they were doing it, what the thinking was",
-        "  next_action - the single concrete next step they were about to take",
-        "  open_loops  - up to 3 unfinished threads, as short strings",
+        "  next_action - a DIRECT INSTRUCTION for the very next step, as if "
+        "telling them what to do ('Reply to Marcus about the infra cost'), "
+        "never a description of options",
+        "  open_loops  - up to 3 unfinished items, ORDERED BY CONSEQUENCE: "
+        "the one that costs most if forgotten comes first",
         "  confidence  - high, medium, or low",
         "  evidence    - one sentence naming the specific things ON SCREEN "
         "that support this. Name the actual document, window, or content "
@@ -295,6 +356,7 @@ def generate():
     frames = newest_frames(FRAMES_PER_CARD)
     park = read_park_note()
     corrections = read_corrections()
+    graph, active, parked, emergent, memory = thread_context()
 
     model, reduced = pick_model()
     log(f"model: {model}" + ("  (REDUCED - emergency fallback)" if reduced else ""))
@@ -309,7 +371,8 @@ def generate():
         (f"  corrections carried: {len(corrections)}" if corrections else ""))
 
     images = [base64.b64encode(f.read_bytes()).decode() for f, _ in frames]
-    prompt = build_prompt(frames, park, corrections)
+    prompt = build_prompt(frames, park, corrections,
+                          active=active, parked=parked, memory=memory)
 
     card = None
     for attempt in (1, 2):
@@ -356,6 +419,29 @@ def generate():
 
     if corrections:
         card["corrections_used"] = [c["text"] for c in corrections]
+
+    # Thread-awareness on the card itself. The parked list and emergent
+    # proposal come from the graph, never from the model: the model
+    # reconstructs the active thread, the graph holds the rest.
+    if active:
+        card["thread"] = active["name"]
+    card["parked"] = parked
+    if emergent:
+        card["emergent_proposal"] = {
+            "sample_text": emergent["sample_text"],
+            "coherence": emergent["coherence"],
+            "frames": emergent["frames"],
+        }
+
+    if graph is not None and active and not card.get("fail_closed"):
+        try:
+            import threads as T
+            T.add_history(graph, active["id"], "card",
+                          f"{card['goal']} → {card['next_action']}")
+            T.touch(graph, active["id"], return_point=card["next_action"])
+            T.save(graph)
+        except Exception:
+            pass
 
     card["generated_at"] = datetime.now().isoformat(timespec="seconds")
     card["frames_used"] = [f.name for f, _ in frames]
