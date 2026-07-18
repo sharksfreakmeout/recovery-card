@@ -24,6 +24,10 @@ ROOT = Path(__file__).resolve().parent
 CAPTURES = ROOT / "captures"
 CARDS = ROOT / "cards"
 PARK_NOTE = CARDS / "park_note.json"
+CORRECTIONS = CARDS / "corrections.json"
+
+# How many recent corrections carry forward as session memory.
+CORRECTION_MEMORY = int(os.environ.get("CORRECTION_MEMORY", 3))
 
 OLLAMA = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
@@ -134,8 +138,39 @@ def read_park_note():
         return None
 
 
-def build_prompt(frames, park):
+def read_corrections():
+    """Recent corrections the person typed after marking a card wrong.
+
+    These are their own words about what they were actually doing, so they
+    carry the same authority as a park note. Keeping the last few gives the
+    next card a little session memory: if it misread the work once and was
+    told so, it should not make the same mistake again.
+    """
+    if not CORRECTIONS.exists():
+        return []
+    try:
+        log = json.loads(CORRECTIONS.read_text())
+    except Exception:
+        return []
+    return [c for c in log if c.get("text", "").strip()][-CORRECTION_MEMORY:]
+
+
+def build_prompt(frames, park, corrections=None):
     lines = []
+
+    if corrections:
+        lines.append("THE PERSON HAS ALREADY CORRECTED EARLIER CARDS:")
+        for c in corrections:
+            lines.append(f'  on {c.get("field", "a field")}: '
+                         f'"{c["text"].strip()}"')
+        lines += [
+            "",
+            "These are their own words, stated after seeing a card that was "
+            "wrong. Treat them as confirmed truth, exactly as you would a "
+            "park note, and do not repeat the mistake they describe.",
+            "",
+        ]
+
     if park:
         lines += [
             "BEFORE STEPPING AWAY, THE PERSON WROTE THIS NOTE:",
@@ -259,6 +294,7 @@ def generate():
 
     frames = newest_frames(FRAMES_PER_CARD)
     park = read_park_note()
+    corrections = read_corrections()
 
     model, reduced = pick_model()
     log(f"model: {model}" + ("  (REDUCED - emergency fallback)" if reduced else ""))
@@ -269,10 +305,11 @@ def generate():
                            [], model, reduced)
 
     log(f"frames: {len(frames)}  " +
-        ("park note: yes" if park else "park note: none"))
+        ("park note: yes" if park else "park note: none") +
+        (f"  corrections carried: {len(corrections)}" if corrections else ""))
 
     images = [base64.b64encode(f.read_bytes()).decode() for f, _ in frames]
-    prompt = build_prompt(frames, park)
+    prompt = build_prompt(frames, park, corrections)
 
     card = None
     for attempt in (1, 2):
@@ -316,6 +353,9 @@ def generate():
     if park:
         card["park_note"] = park.get("text", "").strip()
         card["park_note_at"] = park.get("timestamp")
+
+    if corrections:
+        card["corrections_used"] = [c["text"] for c in corrections]
 
     card["generated_at"] = datetime.now().isoformat(timespec="seconds")
     card["frames_used"] = [f.name for f, _ in frames]

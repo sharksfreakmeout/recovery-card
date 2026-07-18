@@ -31,6 +31,7 @@ CAPTURES = ROOT / "captures"
 CARDS = ROOT / "cards"
 STATUS = CAPTURES / "status.json"
 PARK_NOTE = CARDS / "park_note.json"
+CORRECTIONS = CARDS / "corrections.json"
 
 app = Flask(__name__)
 
@@ -436,6 +437,65 @@ def api_eval():
     })
 
 
+@app.route("/api/verdict", methods=["POST"])
+def api_verdict():
+    """A tap on the live card: one field, right or wrong.
+
+    Optionally carries a correction - the person saying, in one line, what
+    they were actually doing. That is user-confirmed truth, so it is stored
+    on the card, in the eval record, and in the session-memory log that
+    card.py weights alongside park notes.
+
+    One tap, one optional line, done. No chat, no follow-up.
+    """
+    body = request.json or {}
+    fname = body.get("file", "")
+    field = body.get("field", "")
+    value = body.get("value")
+    text = (body.get("correction") or "").strip()
+
+    path = CARDS / fname
+    if not fname.startswith("card_") or not path.exists():
+        return jsonify({"ok": False, "error": "unknown card"}), 400
+    if field not in eval_mod.FIELDS:
+        return jsonify({"ok": False, "error": "unknown field"}), 400
+
+    try:
+        c = json.loads(path.read_text())
+    except Exception:
+        return jsonify({"ok": False, "error": "unreadable card"}), 400
+
+    correction = None
+    if text:
+        correction = {
+            "field": field,
+            "text": text,
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "card": fname,
+        }
+        # Attach to the card itself, so the artifact carries its own
+        # correction and stays replayable.
+        c.setdefault("corrections", []).append(correction)
+        path.write_text(json.dumps(c, indent=2))
+
+        # And to session memory, which the next card reads as truth.
+        log = []
+        if CORRECTIONS.exists():
+            try:
+                log = json.loads(CORRECTIONS.read_text())
+            except Exception:
+                log = []
+        log.append(correction)
+        CORRECTIONS.write_text(json.dumps(log[-50:], indent=2))
+
+    results = eval_mod.upsert(
+        eval_mod.load_results(), fname, c,
+        {field: (True if value is True else False)},
+        source="product", correction=correction)
+
+    return jsonify({"ok": True, "tally": eval_mod.tally_dict(results)})
+
+
 @app.route("/api/eval/mark", methods=["POST"])
 def api_eval_mark():
     body = request.json or {}
@@ -534,6 +594,32 @@ PAGE = r"""
   .card h2 {
     font-size:11px; letter-spacing:.14em; color:var(--dim);
     font-weight:600; margin:0 0 8px;
+    display:flex; align-items:center; gap:8px;
+  }
+  /* Verdict taps. Deliberately faint until hovered: the card is for
+     reading, not for grading. Confirmation is a colour change, never a
+     popup. */
+  .taps { margin-left:auto; display:flex; gap:3px; opacity:.25;
+          transition:opacity .15s; }
+  .card:hover .taps { opacity:.7; }
+  .taps:hover { opacity:1 !important; }
+  .taps button {
+    padding:1px 7px; font-size:11px; border-radius:5px; line-height:1.5;
+    background:transparent; border:1px solid var(--line); color:var(--dim);
+  }
+  .taps button.y.on { background:var(--good); border-color:var(--good);
+                      color:#0f1115; opacity:1; }
+  .taps button.n.on { background:var(--bad); border-color:var(--bad);
+                      color:#0f1115; opacity:1; }
+  .fixbox { display:flex; gap:6px; margin:8px 0 2px; }
+  .fixbox input {
+    flex:1; font:inherit; font-size:13px; padding:7px 11px;
+    border-radius:7px; border:1px solid var(--accent);
+    background:var(--bg); color:var(--text);
+  }
+  .fixbox input:focus { outline:none; }
+  .fixed-note {
+    margin:8px 0 2px; font-size:12.5px; color:var(--good);
   }
   .goal { font-size:23px; font-weight:500; line-height:1.35; margin:0 0 10px; letter-spacing:-.01em; }
   .reason { color:var(--dim); margin:0; }
@@ -709,9 +795,18 @@ async function tick() {
   renderHistory(d.history);
 }
 
+// Only rebuild when the card or its verdicts actually change. Redrawing on
+// every poll would wipe a correction box while it is being typed into, and
+// re-run the entrance animation.
+let lastCardSig = null;
+
 function renderCard(c) {
   const slot = document.getElementById("card-slot");
-  if (!c) { slot.innerHTML = ""; return; }
+  if (!c) { slot.innerHTML = ""; lastCardSig = null; return; }
+
+  const sig = JSON.stringify([c._file, verdicts, (c.corrections || []).length]);
+  if (sig === lastCardSig) return;
+  lastCardSig = sig;
 
   let flag = "";
   if (c.reduced_model)
@@ -721,24 +816,88 @@ function renderCard(c) {
 
   const loops = (c.open_loops || []).map(l => "<li>" + esc(l) + "</li>").join("");
 
+  const f = c._file;
   slot.innerHTML = `
     <div class="card">
       ${flag}
-      <h2>PICK UP HERE</h2>
+      <h2>PICK UP HERE ${taps(f, "goal")}</h2>
       <p class="goal">${esc(c.goal)}</p>
+      <div id="fix-goal"></div>
+      <h2 style="margin-top:18px">WHY ${taps(f, "reasoning")}</h2>
       <p class="reason">${esc(c.reasoning)}</p>
+      <div id="fix-reasoning"></div>
       <div class="sec">
-        <h2>NEXT STEP</h2>
+        <h2>NEXT STEP ${taps(f, "next_action")}</h2>
         <p class="next">${esc(c.next_action)}</p>
+        <div id="fix-next_action"></div>
       </div>
-      ${loops ? `<div class="sec"><h2>OPEN LOOPS</h2><ul>${loops}</ul></div>` : ""}
+      ${loops ? `<div class="sec"><h2>OPEN LOOPS ${taps(f, "open_loops")}</h2>
+        <ul>${loops}</ul><div id="fix-open_loops"></div></div>` : ""}
       ${c.park_note ? `<div class="said">You said: “${esc(c.park_note)}”</div>` : ""}
+      ${(c.corrections || []).map(x =>
+        `<div class="said">You corrected: “${esc(x.text)}”</div>`).join("")}
       <div class="meta">
         confidence ${esc(c.confidence)} · ${esc(c.model || "")}
         ${c.trigger ? "· triggered by " + esc(c.trigger) : ""}<br>
         evidence: ${esc(c.evidence)}
       </div>
     </div>`;
+}
+
+// --- verdict taps ----------------------------------------------------
+// One tap records right or wrong. A wrong tap opens one line asking what
+// they were actually doing. That line becomes truth for later cards.
+// No chat, no follow-up questions, no popups.
+let verdicts = {};
+
+function taps(file, field) {
+  const v = verdicts[file + ":" + field];
+  return `<span class="taps">
+    <button class="y ${v === true ? "on" : ""}"
+            onclick="tap('${file}','${field}',true)" title="Right">✓</button>
+    <button class="n ${v === false ? "on" : ""}"
+            onclick="tap('${file}','${field}',false)" title="Wrong">✗</button>
+  </span>`;
+}
+
+async function tap(file, field, value) {
+  verdicts[file + ":" + field] = value;
+  lastCardSig = null;              // let the card redraw with the new state
+  await fetch("/api/verdict", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({file, field, value})
+  });
+  tick();
+  drawScoring();
+  if (value === false) setTimeout(() => showFix(file, field), 60);
+}
+
+function showFix(file, field) {
+  const host = document.getElementById("fix-" + field);
+  if (!host) return;
+  host.innerHTML = `<div class="fixbox">
+      <input id="fixin-${field}" placeholder="What were you actually doing?"
+             onkeydown="if(event.key==='Enter')saveFix('${file}','${field}')">
+      <button onclick="saveFix('${file}','${field}')">Save</button>
+    </div>`;
+  const i = document.getElementById("fixin-" + field);
+  if (i) i.focus();
+}
+
+async function saveFix(file, field) {
+  const i = document.getElementById("fixin-" + field);
+  const text = i ? i.value.trim() : "";
+  if (!text) return;
+  await fetch("/api/verdict", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({file, field, value: false, correction: text})
+  });
+  const host = document.getElementById("fix-" + field);
+  if (host) host.innerHTML =
+    `<div class="fixed-note">Saved. Later cards will treat that as truth.</div>`;
+  drawScoring();
 }
 
 function renderHistory(h) {

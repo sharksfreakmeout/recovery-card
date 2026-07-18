@@ -81,18 +81,53 @@ def tally_dict(results):
     about the score.
     """
     per, correct, judged = tally(results)
+
+    # Lab trials and in-product taps are one dataset, reported together and
+    # also split, so it stays visible how much of the score came from real
+    # use versus deliberate scoring sessions.
+    by_source = {}
+    for src in ("lab", "product"):
+        subset = {k: v for k, v in results.items()
+                  if src in (v.get("sources") or ["lab"])}
+        _, c, j = tally(subset)
+        by_source[src] = {"correct": c, "judged": j}
+
     return {
         "fields": {f: {"correct": per[f][0], "judged": per[f][1]}
                    for f in FIELDS},
         "overall": {"correct": correct, "judged": judged},
         "percent": round(100 * correct / judged, 1) if judged else None,
+        "by_source": by_source,
+        "corrections": sum(len(v.get("corrections") or [])
+                           for v in results.values()),
     }
 
 
-def record(results, card_file, card, marks):
-    """Store one card's four marks. Shared by the CLI and the app."""
-    results[card_file] = {
-        "marks": marks,
+def upsert(results, card_file, card, marks, source="product",
+           correction=None, replace=False):
+    """Merge marks into a card's record. Shared by the CLI and the app.
+
+    Two kinds of verdict land in the same store:
+      - "lab"     a deliberate scoring pass against a park note
+      - "product" a tap on the live card while actually using it
+
+    They merge rather than overwrite, because a person taps one field now
+    and another later. Passing replace=True (the lab panel, which submits
+    all four fields at once) overwrites instead.
+    """
+    rec = results.get(card_file) or {}
+    existing = {} if replace else (rec.get("marks") or {})
+
+    for f, v in (marks or {}).items():
+        if f in FIELDS:
+            existing[f] = v if v in (True, False) else None
+
+    sources = set(rec.get("sources") or [])
+    sources.add(source)
+
+    rec.update({
+        "marks": existing,
+        "sources": sorted(sources),
         "judged_at": datetime.now().isoformat(timespec="seconds"),
         "park_note": card.get("park_note", ""),
         "goal": card.get("goal", ""),
@@ -100,9 +135,20 @@ def record(results, card_file, card, marks):
         "model": card.get("model", ""),
         "trigger": card.get("trigger", ""),
         "fail_closed": bool(card.get("fail_closed")),
-    }
+    })
+
+    if correction:
+        rec.setdefault("corrections", []).append(correction)
+
+    results[card_file] = rec
     save_results(results)
     return results
+
+
+def record(results, card_file, card, marks):
+    """Lab-trial scoring: all four fields submitted together."""
+    return upsert(results, card_file, card, marks,
+                  source="lab", replace=True)
 
 
 def tally(results):
@@ -261,6 +307,26 @@ def breakdown(results):
                 if m in (True, False))
         if n:
             print(f"  {level:<12} {ok}/{n}")
+
+    # Lab trials and in-product taps are one report, split for visibility.
+    print()
+    print(f"{BOLD}By source{OFF}")
+    for src, label in (("lab", "lab trials"), ("product", "in product")):
+        subset = {k: v for k, v in results.items()
+                  if src in (v.get("sources") or ["lab"])}
+        _, c, j = tally(subset)
+        if j:
+            print(f"  {label:<12} {c}/{j}")
+
+    corrections = [(k, c) for k, v in results.items()
+                   for c in (v.get("corrections") or [])]
+    if corrections:
+        print()
+        print(f"{BOLD}Corrections you wrote{OFF}  "
+              f"{DIM}(treated as truth on later cards){OFF}")
+        for k, c in corrections[-5:]:
+            print(f"  {DIM}{c.get('field', '?'):<12}{OFF} "
+                  f"\"{c.get('text', '')}\"")
 
     failed = [r for r in results.values() if r.get("fail_closed")]
     if failed:
