@@ -113,8 +113,22 @@ class RecoveryCard(rumps.App):
                 return
 
     def notify(self, title, subtitle, message):
-        """Native banner. Falls back to osascript when unbundled Python
-        cannot post notifications directly."""
+        """Announce a card - but only if explicitly asked to.
+
+        Off by default, and that is the product working as intended. This
+        tool exists to lower the cost of an interruption, and a banner is
+        an interruption: it competes for attention on arrival and leaves
+        residue in Notification Center to clear later. For someone with
+        ADHD that is a tax, not a neutral.
+
+        The announcement is ambient instead: the bone in the menu bar
+        changes to a card-ready state. Visible if you look for it,
+        invisible if you don't. The card waits until you reach for it.
+
+        Set NOTIFY=1 to opt into banners.
+        """
+        if os.environ.get("NOTIFY") != "1":
+            return
         try:
             rumps.notification(title, subtitle, message)
             return

@@ -308,6 +308,64 @@ def api_generate():
         os.environ.pop("RECOVERY_TRIGGER", None)
 
 
+@app.route("/api/summon", methods=["POST", "GET"])
+def api_summon():
+    """Bring up the card. Bound to a global hotkey via macOS Shortcuts.
+
+    Pull, not push: nothing about this system asks for attention. This is
+    the moment the person reaches for it.
+    """
+    global _generating_since
+
+    overlay = str(request.args.get("overlay", "1")).lower() not in ("0", "false")
+    c = latest_card()
+    fresh = False
+    if c:
+        try:
+            age = (datetime.now() -
+                   datetime.fromisoformat(c["generated_at"])).total_seconds()
+            fresh = age < 600  # 10 minutes, per spec
+        except Exception:
+            fresh = False
+
+    if overlay:
+        open_overlay()
+
+    if fresh or _generating_since is not None:
+        return jsonify({"ok": True, "generated": False, "card": bool(c)})
+
+    _generating_since = time.time()
+    os.environ["RECOVERY_TRIGGER"] = "hotkey"
+    try:
+        card_mod.generate()
+        return jsonify({"ok": True, "generated": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    finally:
+        _generating_since = None
+        os.environ.pop("RECOVERY_TRIGGER", None)
+
+
+_overlay_proc = None
+
+
+def open_overlay():
+    global _overlay_proc
+    if _overlay_proc and _overlay_proc.poll() is None:
+        return
+    _overlay_proc = subprocess.Popen(
+        [sys.executable, str(ROOT / "overlay.py"),
+         f"http://localhost:{request.host.split(':')[-1]}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+@app.route("/overlay")
+def overlay_page():
+    """The card alone, on nothing. Rendered into a blurred full-screen
+    window so the rest of the desktop stops competing for attention."""
+    return render_template_string(OVERLAY_PAGE)
+
+
 @app.route("/api/park", methods=["POST"])
 def api_park():
     text = (request.json or {}).get("text", "").strip()
@@ -665,6 +723,154 @@ def choose_port():
         if not port_busy(port):
             return port, True
     return preferred, True
+
+
+OVERLAY_PAGE = r"""
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Recovery Card</title>
+<style>
+  /* Everything here sits on a transparent, vibrancy-blurred macOS window.
+     The desktop behind is still visible but out of focus, so there is
+     exactly one thing to read. */
+  html, body {
+    margin:0; height:100%; background:transparent; overflow:hidden;
+    font:16px/1.65 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    -webkit-user-select:none; user-select:none;
+  }
+  /* A scrim over the whole screen. macOS vibrancy supplies the blur; this
+     supplies the dimming, and it is also the fallback that still isolates
+     the card if vibrancy is unavailable. */
+  #stage {
+    height:100%; display:flex; align-items:center; justify-content:center;
+    padding:6vh 5vw;
+    background:rgba(8,9,12,.52);
+    animation:fade .28s ease-out;
+  }
+  @media (prefers-color-scheme: light) {
+    #stage { background:rgba(236,238,242,.55); }
+  }
+  @keyframes fade { from { opacity:0; } to { opacity:1; } }
+  .card {
+    width:min(680px, 92vw); max-height:88vh; overflow-y:auto;
+    background:rgba(22,24,30,.82); color:#f2f4f8;
+    border:1px solid rgba(255,255,255,.10);
+    border-radius:20px; padding:44px 46px;
+    box-shadow:0 30px 90px rgba(0,0,0,.45);
+    animation:rise .34s cubic-bezier(.2,.8,.25,1);
+  }
+  @media (prefers-color-scheme: light) {
+    .card { background:rgba(252,252,253,.86); color:#14171c;
+            border-color:rgba(0,0,0,.08); }
+    .reason, .meta, h2 { color:#5b6472 !important; }
+  }
+  @keyframes rise {
+    from { opacity:0; transform:translateY(10px) scale(.99); }
+    to   { opacity:1; transform:none; }
+  }
+  h2 { font-size:10.5px; letter-spacing:.18em; font-weight:600;
+       color:#8b93a1; margin:0 0 10px; }
+  .goal { font-size:29px; font-weight:500; line-height:1.28;
+          letter-spacing:-.02em; margin:0 0 14px; }
+  .reason { color:#9aa3b2; margin:0; font-size:16.5px; }
+  .sec { margin-top:30px; }
+  .next { font-size:20px; margin:0; font-weight:450; }
+  ul { margin:0; padding-left:20px; }
+  li { margin:5px 0; }
+  .said { margin-top:26px; padding:14px 18px; border-left:2px solid #7aa2f7;
+          background:rgba(122,162,247,.10); font-style:italic;
+          border-radius:0 8px 8px 0; }
+  .meta { margin-top:30px; padding-top:18px;
+          border-top:1px solid rgba(255,255,255,.10);
+          font-size:12.5px; color:#8b93a1; }
+  .flag { display:inline-block; padding:4px 10px; border-radius:6px;
+          font-size:10.5px; font-weight:700; letter-spacing:.08em;
+          margin-bottom:16px; }
+  .flag.reduced { background:rgba(224,175,104,.18); color:#e0af68; }
+  .flag.failed  { background:rgba(247,118,142,.16); color:#f7768e; }
+  .hint { margin-top:22px; text-align:center; font-size:12px;
+          color:rgba(255,255,255,.45); }
+  .waiting { text-align:center; color:#9aa3b2; }
+  .spin { width:26px; height:26px; margin:0 auto 16px;
+          border:2px solid rgba(255,255,255,.18); border-top-color:#7aa2f7;
+          border-radius:50%; animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<script>
+function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+
+function close() {
+  if (window.pywebview && window.pywebview.api && window.pywebview.api.close)
+    window.pywebview.api.close();
+}
+
+// Escape and click-outside only. Enter and Space are deliberately NOT
+// dismiss keys: this thing appears over whatever you were doing, and a
+// stray keystroke should not make it vanish before you have read it.
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") close();
+});
+document.addEventListener("click", e => {
+  if (!e.target.closest(".card")) close();
+});
+
+async function draw() {
+  let d;
+  try { d = await (await fetch("/api/state")).json(); }
+  catch (e) { return; }
+
+  const stage = document.getElementById("stage");
+
+  if (d.mode === "RECONSTRUCTING" || (!d.card && d.running)) {
+    stage.innerHTML = `<div class="card waiting"><div class="spin"></div>
+      <div>Reading your screens…</div>
+      <div class="hint">${d.reconstructing_for ?? 0}s</div></div>`;
+    return;
+  }
+
+  const c = d.card;
+  if (!c) {
+    stage.innerHTML = `<div class="card waiting">
+      <div>No card yet.</div>
+      <div class="hint">esc to dismiss</div></div>`;
+    return;
+  }
+
+  let flag = "";
+  if (c.reduced_model) flag += '<div class="flag reduced">REDUCED MODEL</div> ';
+  if (c.fail_closed)   flag += '<div class="flag failed">NOT ENOUGH SIGNAL</div>';
+  const loops = (c.open_loops||[]).map(l=>"<li>"+esc(l)+"</li>").join("");
+
+  stage.innerHTML = `
+    <div class="card">
+      ${flag}
+      <h2>PICK UP HERE</h2>
+      <p class="goal">${esc(c.goal)}</p>
+      <p class="reason">${esc(c.reasoning)}</p>
+      <div class="sec"><h2>NEXT STEP</h2><p class="next">${esc(c.next_action)}</p></div>
+      ${loops?`<div class="sec"><h2>OPEN LOOPS</h2><ul>${loops}</ul></div>`:""}
+      ${c.park_note?`<div class="said">You said: “${esc(c.park_note)}”</div>`:""}
+      <div class="meta">
+        confidence ${esc(c.confidence)} · ${esc(c.model||"")}
+        ${c.trigger?"· triggered by "+esc(c.trigger):""}<br>
+        evidence: ${esc(c.evidence)}
+      </div>
+    </div>
+    <div class="hint">esc to dismiss</div>`;
+}
+
+draw();
+setInterval(draw, 2000);
+window.addEventListener("focus", draw);
+</script>
+</body>
+</html>
+"""
 
 
 if __name__ == "__main__":
