@@ -132,16 +132,14 @@ def main():
     check("global hotkey (⌃⌥⌘R)", hk_state == "active", hk_state,
           warn=hk_state != "active")
 
-    # 7. Launch path (see PLite.app stub work): which process owns the
-    # screen-recording permission this session.
-    parent = "unknown"
-    try:
-        parent = subprocess.run(
-            ["ps", "-o", "comm=", "-p", str(os.getppid())],
-            capture_output=True, text=True).stdout.strip()
-    except Exception:
-        pass
-    check("launch path", True, f"running under: {parent}", warn=False)
+    # 7. Launch path: recorded by the launcher itself, because nohup
+    # detaches the engine and process ancestry loses the stub.
+    lp = ROOT / "logs" / "launch_path"
+    via = lp.read_text().strip() if lp.exists() else "unknown"
+    path_desc = ("stub (PLite.app) - Screen Recording belongs to PLite"
+                 if via == "stub" else f"{via} - Screen Recording belongs "
+                 "to the terminal app")
+    check("launch path", True, path_desc, warn=False)
 
     print()
     if all(results):

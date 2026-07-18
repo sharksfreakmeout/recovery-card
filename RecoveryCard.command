@@ -75,6 +75,7 @@ fi
 
 stop_all
 mkdir -p "$LOGDIR"
+echo "${PLITE_VIA:-terminal}" > "$LOGDIR/launch_path"
 
 # Detached, so closing this window does not kill the app.
 PORT="$PORT" IDLE_THRESHOLD="$IDLE" nohup "$PY" menubar.py \

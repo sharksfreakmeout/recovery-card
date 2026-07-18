@@ -1,0 +1,22 @@
+#!/bin/bash
+# plite — one command for everything.
+#
+#   plite start        start engine + menu bar + window (safe to repeat)
+#   plite stop         stop every component, including strays
+#   plite status       what is running
+#   plite doctor       pre-demo checks
+#   plite bench        start with demo settings (KEEP_ALIVE 15m, IDLE 20s)
+#   plite rehearse …   scripted rehearsal runs (see rehearse.py)
+
+cd "$(dirname "$0")" || exit 1
+PY=".venv/bin/python"
+
+case "${1:-start}" in
+  start)   exec ./RecoveryCard.command ;;
+  stop)    exec ./RecoveryCard.command stop ;;
+  status)  exec ./RecoveryCard.command status ;;
+  doctor)  exec "$PY" doctor.py ;;
+  bench)   MODEL_KEEP_ALIVE=15m IDLE_THRESHOLD=20 exec ./RecoveryCard.command ;;
+  rehearse) shift; exec "$PY" rehearse.py "$@" ;;
+  *) echo "plite: start | stop | status | doctor | bench | rehearse"; exit 1 ;;
+esac

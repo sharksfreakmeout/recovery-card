@@ -78,7 +78,7 @@ class RecoveryCard(rumps.App):
         self.item_summon = rumps.MenuItem("Show my card  ⌃⌥⌘R",
                                           callback=lambda _: self.summon())
         self.item_window = rumps.MenuItem("Open card window", callback=self.open_window)
-        self.item_quit = rumps.MenuItem("Quit Recovery Card", callback=self.quit_app)
+        self.item_quit = rumps.MenuItem("Quit PLite", callback=self.quit_app)
 
         self.menu = [
             self.item_state,
@@ -295,15 +295,23 @@ class RecoveryCard(rumps.App):
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def quit_app(self, _):
-        # Leave nothing running behind us.
+        """Quit PLite = tear EVERYTHING down, including strays from old
+        sessions - same as `plite stop`. The stop script also kills this
+        process, which is fine: we are quitting."""
         try:
-            api("/api/capture/stop", method="POST", payload={})
+            subprocess.Popen([str(ROOT / "RecoveryCard.command"), "stop"],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
         except Exception:
-            pass
-        if self.window_proc and self.window_proc.poll() is None:
-            self.window_proc.terminate()
-        if self.backend and self.backend.poll() is None:
-            self.backend.terminate()
+            # fallback: at least stop our own children
+            try:
+                api("/api/capture/stop", method="POST", payload={})
+            except Exception:
+                pass
+            if self.window_proc and self.window_proc.poll() is None:
+                self.window_proc.terminate()
+            if self.backend and self.backend.poll() is None:
+                self.backend.terminate()
         rumps.quit_application()
 
 
