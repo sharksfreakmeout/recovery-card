@@ -608,6 +608,14 @@ async function preflight() {
      <code>${esc(i.fix)}</code></div>`).join("");
 }
 
+// Summoning the window by hotkey must show the truth immediately, not
+// whatever the last 2-second poll happened to catch.
+window.addEventListener("focus", tick);
+window.addEventListener("pageshow", tick);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) tick();
+});
+
 preflight();
 tick();
 setInterval(tick, 2000);
@@ -640,12 +648,20 @@ def port_busy(port):
     return False
 
 
+# The demo URL is deterministic on purpose: one address, one hotkey, one
+# piece of muscle memory. 5001 rather than 5000 because macOS AirPlay
+# Receiver owns 5000. Override with PORT if you ever need to.
+DEFAULT_PORT = 5001
+
+
 def choose_port():
-    preferred = int(os.environ.get("PORT", 5000))
-    for port in range(preferred, preferred + 10):
+    preferred = int(os.environ.get("PORT", DEFAULT_PORT))
+    if not port_busy(preferred):
+        return preferred, False
+    for port in range(preferred + 1, preferred + 10):
         if not port_busy(port):
-            return port, port != preferred
-    return preferred, False
+            return port, True
+    return preferred, True
 
 
 if __name__ == "__main__":
@@ -657,9 +673,15 @@ if __name__ == "__main__":
     if not issues:
         print("  All checks passed: Ollama up, model present, screen readable.")
 
+    wanted = int(os.environ.get("PORT", DEFAULT_PORT))
     port, moved = choose_port()
     if moved:
-        print(f"\n  Port 5000 is taken (macOS AirPlay Receiver uses it).")
-        print(f"  Using port {port} instead.")
+        print("\n" + "!" * 66)
+        print(f"  WARNING: port {wanted} was busy, so this is running on {port}.")
+        print(f"  Your usual URL will NOT work. Use the one below.")
+        print(f"  To free up {wanted}, quit whatever is using it:")
+        print(f"      lsof -nP -iTCP:{wanted} -sTCP:LISTEN")
+        print("!" * 66)
+
     print(f"\n  Open http://localhost:{port} in your browser.\n")
     app.run(host="127.0.0.1", port=port, debug=False)
