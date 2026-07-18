@@ -4,6 +4,7 @@
 set -e
 cd "$(dirname "$0")/.."
 PY=.venv/bin/python
+set -o pipefail
 $PY tests/test_state.py
 $PY tests/test_liveness.py
 $PY tests/test_templates.py

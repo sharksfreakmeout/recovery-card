@@ -109,8 +109,14 @@ def main():
             failures.append(f"no card produced (modes seen: {seen_modes})")
         else:
             sh(f"state walk: {' -> '.join(seen_modes)}")
-            if "RECONSTRUCTING" not in seen_modes or \
-                    "CARD_READY" not in seen_modes:
+            # In FAST mode the stub is written in milliseconds, so
+            # RECONSTRUCTING lives for less than one poll interval and
+            # cannot reliably be observed. The full walk is asserted in
+            # real mode, where generation takes seconds.
+            need = ["CARD_READY"] if FAST else ["RECONSTRUCTING",
+                                                "CARD_READY"]
+            missing = [m for m in need if m not in seen_modes]
+            if missing:
                 failures.append(f"state walk incomplete: {seen_modes}")
 
             c = json.loads(open(new_card).read())
