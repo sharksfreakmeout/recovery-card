@@ -28,7 +28,29 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-CAPTURES = ROOT / "captures"
+
+# TEST ISOLATION IS STRUCTURAL. Test hooks are impossible outside a
+# sandbox: any RC_TEST_* flag without RC_SANDBOX refuses to run, and a
+# sandbox redirects every store (frames, status, cards, graph, events)
+# to its own directory. A test can no longer touch live state, and a
+# sandboxed capture never spawns a surface.
+SANDBOX = os.environ.get("RC_SANDBOX")
+_TEST_FLAGS = sorted(k for k in os.environ if k.startswith("RC_TEST_"))
+
+
+def refuse_unsandboxed_hooks():
+    """Called when capture RUNS (never at import - app.py imports this
+    module as a library and must not die because its own test env set a
+    flag for a different subprocess)."""
+    if _TEST_FLAGS and not SANDBOX:
+        sys.stderr.write(
+            "capture: test hooks set (" + ", ".join(_TEST_FLAGS) + ") but "
+            "no RC_SANDBOX. Test hooks only run inside a sandbox - "
+            "refusing.\n")
+        sys.exit(2)
+
+_BASE = Path(SANDBOX) if SANDBOX else ROOT
+CAPTURES = _BASE / "captures"
 # app.py reads this to drive the live state panel.
 STATUS = CAPTURES / "status.json"
 
@@ -417,6 +439,9 @@ _slept_at = {"t": None}          # stamped by the notification, best-effort
 _woke_event = threading.Event()  # set by DidWake, best-effort
 
 SLEEP_JUMP = float(os.environ.get("SLEEP_JUMP", 30))  # extra secs = slept
+# A sleep shorter than this is a non-event: no card, no surface, no away
+# line. Closing the lid to walk to a meeting room must cost nothing.
+MIN_AWAY = float(os.environ.get("MIN_AWAY", 60))
 
 
 def _sleep_watcher():
@@ -482,7 +507,7 @@ def generate_card(reason: str, trigger="idle", away=None):
     # Test hook: state-machine tests count cards without paying for
     # inference. The stub card is clearly marked as such.
     if os.environ.get("RC_TEST_STUB_CARD"):
-        CARDS_DIR = ROOT / "cards"
+        CARDS_DIR = _BASE / "cards"   # sandboxed - never the live store
         CARDS_DIR.mkdir(exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         (CARDS_DIR / f"card_{stamp[:15]}.json").write_text(json.dumps({
@@ -582,6 +607,11 @@ def main():
             slept_at = _slept_at["t"]
             away_secs = (cycle_start - slept_at) if slept_at else gap
             _slept_at["t"] = None
+            if away_secs < MIN_AWAY:
+                log(f"sleep blip ({away_secs:.0f}s) - non-event.")
+                prev_fp = None
+                last_cycle = time.time()
+                continue
             summary = away_summary_text(away_secs, asleep=True)
             log(f"Woke from sleep. {summary}")
             try:
@@ -614,19 +644,8 @@ def main():
                 events.log_event("card_ready", trigger="wake")
             except Exception:
                 pass
-            # The return is certain, so the return surface appears on its
-            # own: the calm card-only view, nothing operational. Never a
-            # second one - stacked overlays read as "Esc does nothing".
-            try:
-                if subprocess.run(["pgrep", "-f", "overlay.py"],
-                                  capture_output=True).returncode != 0:
-                    port = os.environ.get("PORT", "5001")
-                    subprocess.Popen(
-                        [sys.executable, str(ROOT / "overlay.py"),
-                         f"http://localhost:{port}"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                pass
+            # WAKE IS QUIET: generation happened in the background; the
+            # card waits. Surfaces appear on summon or true return only.
         # Measured AFTER any card generation: a 30-second generation must
         # not read as another sleep on the next cycle (it did, in testing -
         # one wake fired three cards).
@@ -664,10 +683,12 @@ def main():
                 events.log_event("engaged")  # first input after a return
             except Exception:
                 pass
-            # True return after a real absence: one of the five moments a
-            # surface may appear (silent generation law). Pidfile-deduped;
-            # never a second overlay.
+            # True return after a real absence: one of the sanctioned
+            # moments a surface may appear. Pidfile-deduped; never from a
+            # sandboxed test capture.
             try:
+                if SANDBOX:
+                    raise RuntimeError("sandboxed: no surfaces")
                 pidfile = ROOT / ".overlay.pid"
                 stale = True
                 if pidfile.exists():
@@ -902,6 +923,7 @@ def _on_terminate(signum, frame):
 
 
 if __name__ == "__main__":
+    refuse_unsandboxed_hooks()
     signal.signal(signal.SIGTERM, _on_terminate)
     try:
         main()

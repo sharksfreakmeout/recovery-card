@@ -32,6 +32,14 @@ def check(name, ok, detail="", warn=False):
 
 
 def main():
+    stray = sorted(k for k in os.environ if k.startswith("RC_TEST_")
+                   or k == "RC_SANDBOX")
+    if stray:
+        print(f"\n{RED}Test flags are set in this shell: "
+              f"{', '.join(stray)}{OFF}")
+        print("A normal session never runs with test hooks. "
+              "Unset them and rerun.\n")
+        return 1
     print("\nRecovery Card doctor\n")
 
     # 1. Ollama + models
@@ -139,17 +147,17 @@ def main():
         priv = trust_mod.read_private()
         target = (priv["apps"] or ["Messages"])[0]
         import glob as _g
-        before = set(_g.glob(str(ROOT / "captures" / "frame_*")))
+        import tempfile
+        sb = tempfile.mkdtemp()
         env = dict(os.environ)
-        env.update({"RC_TEST_FRONT_APP": target, "CAPTURE_INTERVAL": "1",
-                    "IDLE_THRESHOLD": "9999"})
+        env.update({"RC_TEST_FRONT_APP": target, "RC_SANDBOX": sb,
+                    "CAPTURE_INTERVAL": "1", "IDLE_THRESHOLD": "9999"})
         p = subprocess.Popen([sys.executable, str(ROOT / "capture.py")],
                              env=env, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL)
         time.sleep(4)
         p.terminate(); p.wait(timeout=5)
-        after = set(_g.glob(str(ROOT / "captures" / "frame_*")))
-        leaked = len(after - before)
+        leaked = len(_g.glob(sb + "/captures/frame_*"))
         check("private-app exclusion (total gap)", leaked == 0,
               f"{len(priv['apps'])} app(s) excluded; 0 frames written "
               "while private app frontmost" if leaked == 0 else

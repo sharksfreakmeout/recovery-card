@@ -13,8 +13,11 @@ import json
 import time
 from pathlib import Path
 
+import os
 ROOT = Path(__file__).resolve().parent
-LOG = ROOT / "eval" / "events.jsonl"
+_BASE = Path(os.environ["RC_SANDBOX"]) if os.environ.get("RC_SANDBOX") \
+    else ROOT
+LOG = _BASE / "eval" / "events.jsonl"
 
 
 def log_event(kind, **fields):

@@ -69,10 +69,10 @@ def test_mirror_exclusion():
 def test_exclusion_total_gap():
     """Excluded app frontmost -> zero frames, no metadata, app never named
     in status; menu-bar state is the quiet paused one."""
-    before = set(glob.glob(str(ROOT / "captures" / "frame_*")))
+    sb = Path(tempfile.mkdtemp(prefix="rc_excl_"))
     env = dict(os.environ)
-    env.update({"RC_TEST_FRONT_APP": "Messages", "CAPTURE_INTERVAL": "1",
-                "IDLE_THRESHOLD": "9999"})
+    env.update({"RC_TEST_FRONT_APP": "Messages", "RC_SANDBOX": str(sb),
+                "CAPTURE_INTERVAL": "1", "IDLE_THRESHOLD": "9999"})
     # ensure Messages is on the exclusion list for the test
     import trust
     d = trust.read_private()
@@ -85,9 +85,9 @@ def test_exclusion_total_gap():
                          stderr=subprocess.DEVNULL)
     try:
         time.sleep(4)
-        st = json.loads((ROOT / "captures" / "status.json").read_text())
-        after = set(glob.glob(str(ROOT / "captures" / "frame_*")))
-        assert after == before, f"{len(after - before)} frame(s) leaked"
+        st = json.loads((sb / "captures" / "status.json").read_text())
+        leaked = glob.glob(str(sb / "captures" / "frame_*"))
+        assert not leaked, f"{len(leaked)} frame(s) leaked"
         assert st.get("mode") == "PAUSED_PRIVATE", st.get("mode")
         assert "Messages" not in json.dumps(st), "status names the app"
     finally:

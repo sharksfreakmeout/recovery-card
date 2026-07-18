@@ -3544,6 +3544,15 @@ if (READONLY_CARD) {
 
 
 if __name__ == "__main__":
+    _test_flags = sorted(k for k in os.environ if k.startswith("RC_TEST_")
+                         or k == "RC_SANDBOX")
+    if _test_flags and str(os.environ.get("PORT", DEFAULT_PORT)) == \
+            str(DEFAULT_PORT):
+        print("\n  Test flags are set (" + ", ".join(_test_flags) + ") "
+              "but this is the LIVE port.")
+        print("  A live engine never runs with test hooks. Unset them, or "
+              "use a test PORT.\n")
+        sys.exit(2)
     print("Recovery Card — running preflight...")
     issues = preflight()
     for issue in issues:

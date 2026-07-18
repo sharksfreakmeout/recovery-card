@@ -88,8 +88,71 @@ def test_folder_token():
     print("PASS  folder token extraction (editors only)")
 
 
+def test_live_fixture_amazon_absorption():
+    """The exact live regression: Phossil active, background Cursor window
+    titled with the project name, sustained Amazon shopping frontmost.
+    Real URLs from the incident as fixture data. Must never absorb; must
+    surface as emergent; Phossil's restore list must stay clean."""
+    g = fresh_graph()
+    work = frame("Cursor",
+                 "Gate_Contract_Crosswalk_Report.md — phossil-production-app")
+    for _ in range(4):
+        tid, _, _ = T.classify(g, work)
+        T.update_affinity(g, tid, work)
+    assert g["meta"]["active_thread"] == "phossil-production-app"
+
+    background = ["Skateboard Pads Adult - 4 Stars & Up — Amazon.com",
+                  "Gate_Contract_Crosswalk_Report.md — phossil-production-app"]
+    shop = [
+        ("Skateboard Pads Adult - 4 Stars & Up — Amazon.com",
+         "https://www.amazon.com/s?k=skateboard+pads+adult"),
+        ("JBM Knee Pads Elbow Pads Wrist Guards — Amazon.com",
+         "https://www.amazon.com/JBM-Adult-Knee-Elbow-Wrist/dp/B01GST70FK"),
+        ("Skateboard Pads Adult - 4 Stars & Up — Amazon.com",
+         "https://www.amazon.com/s?k=skateboard+pads+adult&rh=p_72"),
+    ]
+    for title, url in shop:
+        f = frame("Google Chrome", title, titles=background, url=url)
+        tid, tier, _ = T.classify(g, f)
+        assert tid != "phossil-production-app", \
+            f"ABSORBED via tier {tier} (background-title anchor leak)"
+        T.update_affinity(g, tid, f)
+
+    phossil = g["threads"]["phossil-production-app"]
+    assert not any("amazon" in u for u in phossil.get("recent_urls", [])), \
+        f"amazon URLs in Phossil restore list: {phossil['recent_urls']}"
+    assert T.emergent_candidate(g), "sustained shopping not offered as emergent"
+    print("PASS  live fixture: Amazon shopping never absorbed, restore "
+          "list clean, emergent offered")
+
+
+def test_chips_require_fresh_engagement():
+    """A brief frontmost appearance with carried-over engagement must not
+    produce a chip. keys_ago=8 = typed in the PREVIOUS app."""
+    g = fresh_graph()
+    stale = {"doing": "typing", "keys_ago": 8, "click_ago": 60,
+             "scroll_ago": 60}
+    f = {"frame": "c1", "app": "Claude", "window_title": "phossil notes",
+         "window_titles": ["phossil notes"], "engagement": stale, "ax": {}}
+    tid, _, _ = T.classify(g, f)     # anchors match "phossil" frontmost
+    T.update_affinity(g, tid, f)
+    t = g["threads"]["phossil-production-app"]
+    assert "Claude" not in (t.get("sources_agg") or {}), \
+        "passing frontmost with stale engagement earned a chip"
+    fresh = {"doing": "typing", "keys_ago": 1, "click_ago": 60,
+             "scroll_ago": 60}
+    f["engagement"] = fresh
+    tid, _, _ = T.classify(g, f)
+    T.update_affinity(g, tid, f)
+    assert "Claude" in (t.get("sources_agg") or {}), \
+        "fresh engagement should earn the chip"
+    print("PASS  chips require fresh engagement (stale carryover ignored)")
+
+
 if __name__ == "__main__":
     test_folder_token()
     test_editor_disambiguation()
     test_no_absorption()
+    test_live_fixture_amazon_absorption()
+    test_chips_require_fresh_engagement()
     print("\nCLASSIFICATION TESTS: ALL PASS")

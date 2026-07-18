@@ -25,7 +25,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-IDLE_FILE = Path("/tmp/rc_smoke_idle")
+import tempfile
+SANDBOX = Path(tempfile.mkdtemp(prefix="rc_smoke_"))
+IDLE_FILE = SANDBOX / "idle"
 FAST = bool(os.environ.get("SMOKE_FAST"))
 PORT = os.environ.get("PORT", "5001")
 
@@ -36,7 +38,7 @@ def sh(msg):
 
 def status():
     try:
-        return json.loads((ROOT / "captures" / "status.json").read_text())
+        return json.loads((SANDBOX / "captures" / "status.json").read_text())
     except Exception:
         return {}
 
@@ -53,16 +55,17 @@ def main():
         sys.exit(1)
 
     park_text = "smoke test: verifying the capture-to-card pipeline"
-    (ROOT / "cards").mkdir(exist_ok=True)
-    (ROOT / "cards" / "park_note.json").write_text(json.dumps({
+    (SANDBOX / "cards").mkdir(parents=True, exist_ok=True)
+    (SANDBOX / "cards" / "park_note.json").write_text(json.dumps({
         "text": park_text,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")}))
 
-    baseline_cards = set(glob.glob(str(ROOT / "cards" / "card_*.json")))
+    baseline_cards = set(glob.glob(str(SANDBOX / "cards" / "card_*.json")))
     IDLE_FILE.write_text("0")
 
     env = dict(os.environ)
     env.update({
+        "RC_SANDBOX": str(SANDBOX),
         "RC_TEST_IDLE_FILE": str(IDLE_FILE),
         "CAPTURE_INTERVAL": "2",
         "IDLE_THRESHOLD": "8",
@@ -79,7 +82,7 @@ def main():
     try:
         # 1. Frames with engagement metadata
         time.sleep(7)
-        metas = sorted(glob.glob(str(ROOT / "captures" / "frame_*.json")))
+        metas = sorted(glob.glob(str(SANDBOX / "captures" / "frame_*.json")))
         if not metas:
             failures.append("no frames captured")
         else:
@@ -98,7 +101,7 @@ def main():
             mode = status().get("mode", "")
             if mode and (not seen_modes or seen_modes[-1] != mode):
                 seen_modes.append(mode)
-            fresh = set(glob.glob(str(ROOT / "cards" / "card_*.json"))) \
+            fresh = set(glob.glob(str(SANDBOX / "cards" / "card_*.json"))) \
                 - baseline_cards
             if fresh and status().get("mode") == "CARD_READY":
                 new_card = sorted(fresh)[-1]
@@ -151,14 +154,6 @@ def main():
         proc.terminate()
         proc.wait(timeout=5)
         IDLE_FILE.unlink(missing_ok=True)
-        (ROOT / "cards" / "park_note.json").unlink(missing_ok=True)
-        # stub cards never linger
-        for p in glob.glob(str(ROOT / "cards" / "card_*.json")):
-            try:
-                if json.loads(open(p).read()).get("stub"):
-                    os.unlink(p)
-            except Exception:
-                pass
 
     print()
     if failures:

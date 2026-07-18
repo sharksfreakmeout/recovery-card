@@ -21,8 +21,10 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-CAPTURES = ROOT / "captures"
-CARDS = ROOT / "cards"
+_BASE = Path(os.environ["RC_SANDBOX"]) if os.environ.get("RC_SANDBOX") \
+    else ROOT
+CAPTURES = _BASE / "captures"
+CARDS = _BASE / "cards"
 PARK_NOTE = CARDS / "park_note.json"
 CORRECTIONS = CARDS / "corrections.json"
 

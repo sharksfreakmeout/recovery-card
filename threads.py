@@ -31,7 +31,9 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-GRAPH = ROOT / "graph.json"
+_BASE = Path(os.environ["RC_SANDBOX"]) if os.environ.get("RC_SANDBOX") \
+    else ROOT
+GRAPH = _BASE / "graph.json"
 
 OLLAMA = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "embeddinggemma")
@@ -216,6 +218,18 @@ def editor_folder_token(meta):
     return title.strip().lower()
 
 
+def freshly_engaged(meta):
+    """Engagement that happened ON this frame, not carried over from the
+    previous app. keys_ago<12 is right for affinity, but wrong for source
+    attribution: two seconds after cmd-tabbing out of Cursor, a Claude
+    frame still shows keys_ago~4 from typing IN CURSOR - and that put a
+    Claude chip on a thread with no engaged Claude use. Source accrual
+    demands tighter freshness than affinity does."""
+    e = meta.get("engagement") or {}
+    return (e.get("keys_ago", 999) < 4 or e.get("click_ago", 999) < 2.5
+            or e.get("scroll_ago", 999) < 3)
+
+
 def engaged(meta):
     """Was the user actually doing something in this frame?
 
@@ -266,21 +280,33 @@ def classify(g, meta, hint_tid=None):
         front_parts.append(ftok)
     front = " · ".join(p for p in front_parts if p).lower()
 
-    for scope, weight in ((front, 2.0), (low, 1.0)):
-        if not scope:
-            continue
+    # FRONTMOST ONLY - no fallback to the full text. Background window
+    # titles are context for tier-3 embeddings, never anchor evidence:
+    # the fallback version of this code absorbed sustained Amazon
+    # shopping into a work thread because the work project's Cursor
+    # window sat open in the background of every shopping frame.
+    if front:
         best_tid, best_hits = None, 0
         for tid, t in g["threads"].items():
             if not live(t):
                 continue
-            hits = sum(1 for a in t["anchors"] if a and a in scope)
+            hits = sum(1 for a in t["anchors"] if a and a in front)
             if hits > best_hits:
                 best_tid, best_hits = tid, hits
         if best_hits > 0:
-            return best_tid, 2, float(best_hits) * weight
+            return best_tid, 2, float(best_hits)
 
-    # Tier 3 - semantic similarity vs running centroids.
-    vec = embed(text)[0] if text else None
+    # Tier 3 - semantic similarity vs running centroids. Embed the
+    # FRONTMOST context only: embedding the full desktop meant a
+    # background project window pulled shopping frames toward the work
+    # thread's centroid (the second half of the Amazon absorption bug -
+    # the anchor half was tier 2's background fallback). Where attention
+    # IS is the frontmost window; the rest of the desktop is scenery.
+    front_embed_parts = [meta.get("app") or "", front]
+    if meta.get("clipboard"):
+        front_embed_parts.append(meta["clipboard"])
+    front_text = " · ".join(p for p in front_embed_parts if p)[:2000]
+    vec = embed(front_text)[0] if front_text.strip(" ·") else None
     if vec:
         scored = sorted(
             ((cosine(vec, t.get("centroid")), tid)
@@ -335,35 +361,39 @@ def update_affinity(g, tid, meta):
         # verifiably reopenable later. Collected here, spent by Resume.
         t = g["threads"][tid]
         url = (meta.get("ax") or {}).get("url")
-        if url:
-            urls = [u for u in t.get("recent_urls", []) if u != url]
-            t["recent_urls"] = (urls + [url])[-5:]
-        if meta.get("app") and meta["app"] != "hidden":
-            t["last_app"] = meta["app"]
+        # Restore + source data require FRESH engagement: two seconds
+        # after cmd-tabbing away from typing, the old keystrokes still
+        # read as "engaged" and a passing frontmost app earns credit it
+        # never had. Affinity keeps the looser window; attribution and
+        # restore do not.
+        if freshly_engaged(meta):
+            if url:
+                urls = [u for u in t.get("recent_urls", []) if u != url]
+                t["recent_urls"] = (urls + [url])[-5:]
+            if meta.get("app") and meta["app"] != "hidden":
+                t["last_app"] = meta["app"]
 
-        # SOURCE CHIPS accrual: which apps (or domains, when AX gave us
-        # the URL) actually composed this thread. Only real classified
-        # frames land here - that is the chips' truth rule - and self
-        # frames never reach this code at all. Archived threads stop
-        # classifying, so their chips freeze naturally.
-        key = None
-        if url:
-            try:
-                host = url.split("//", 1)[-1].split("/", 1)[0]
-                key = host.removeprefix("www.")
-            except Exception:
-                key = None
-        if not key and meta.get("app") and meta["app"] != "hidden":
-            key = meta["app"]
-        if key:
-            agg = t.setdefault("sources_agg", {})
-            e = agg.get(key) or {"count": 0, "first": _now()}
-            e["count"] += 1
-            e["last"] = _now()
-            agg[key] = e
-            if len(agg) > 12:  # keep the store tiny; drop the stalest
-                stalest = min(agg, key=lambda k: agg[k]["last"])
-                del agg[stalest]
+            # SOURCE CHIPS accrual: only real classified frames with
+            # fresh engagement. Archived threads stop classifying, so
+            # chips freeze naturally.
+            key = None
+            if url:
+                try:
+                    host = url.split("//", 1)[-1].split("/", 1)[0]
+                    key = host.removeprefix("www.")
+                except Exception:
+                    key = None
+            if not key and meta.get("app") and meta["app"] != "hidden":
+                key = meta["app"]
+            if key:
+                agg = t.setdefault("sources_agg", {})
+                e = agg.get(key) or {"count": 0, "first": _now()}
+                e["count"] += 1
+                e["last"] = _now()
+                agg[key] = e
+                if len(agg) > 12:  # keep the store tiny; drop the stalest
+                    stalest = min(agg, key=lambda k: agg[k]["last"])
+                    del agg[stalest]
 
     active = g["meta"].get("active_thread")
     if tid and tid != active and aff.get(tid, 0) >= SWITCH_MOMENTUM:
@@ -399,13 +429,50 @@ def emergent_candidate(g):
 
 
 def confirm_emergent(g, name, proposal):
-    """User said yes and named it. Fold the evidence in, then heal."""
+    """User said yes and named it. Fold the evidence in, then heal -
+    including the restore lists: URLs that belong to the new thread's
+    story leave every other thread's bring-back list."""
     t = new_thread(g, name, origin="emergent")
     for u in g["untagged"]:
         if u.get("frame") in set(proposal.get("frames", [])):
             feed_embedding(g, t["id"], u.get("vec"))
+    reassign_restore(g, t["id"], proposal.get("sample_text", ""))
     heal(g)
     return t
+
+
+def reassign_restore(g, new_tid, story_text):
+    """Restore lists recompute after reclassification: URLs whose domain
+    appears in the new thread's evidence move there from any thread that
+    absorbed them by mistake."""
+    story = (story_text or "").lower()
+    if not story:
+        return
+    new_t = g["threads"].get(new_tid)
+    for tid, t in g["threads"].items():
+        if tid == new_tid:
+            continue
+        keep_urls = []
+        for u in t.get("recent_urls", []):
+            try:
+                host = u.split("//", 1)[-1].split("/", 1)[0]
+                host = host.removeprefix("www.")
+            except Exception:
+                keep_urls.append(u)
+                continue
+            if host.lower() in story:
+                if new_t is not None:
+                    moved = [x for x in new_t.get("recent_urls", [])
+                             if x != u]
+                    new_t["recent_urls"] = (moved + [u])[-5:]
+                # its chip credit moves too
+                agg = t.get("sources_agg") or {}
+                if host in agg and new_t is not None:
+                    nagg = new_t.setdefault("sources_agg", {})
+                    nagg[host] = agg.pop(host)
+            else:
+                keep_urls.append(u)
+        t["recent_urls"] = keep_urls
 
 
 # --- Retrospective healing ------------------------------------------------
@@ -580,7 +647,8 @@ def chips(t, top=4):
     A chip exists only because real classified frames back it. Returns
     [{label, count, first, last}] plus a spillover count.
     """
-    agg = t.get("sources_agg") or {}
+    agg = {k: v for k, v in (t.get("sources_agg") or {}).items()
+           if k.lower() not in ("unknown", "hidden")}
     ranked = sorted(agg.items(),
                     key=lambda kv: (kv[1]["last"], kv[1]["count"]),
                     reverse=True)

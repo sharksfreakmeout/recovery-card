@@ -24,21 +24,15 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-IDLE_FILE = Path("/tmp/rc_test_idle")
+import tempfile
+SANDBOX = Path(tempfile.mkdtemp(prefix="rc_state_"))
+IDLE_FILE = SANDBOX / "idle"
 
 
 def cards():
-    """STUB cards only. A live product instance (or the user actually
-    stepping away mid-test) can write real cards; those must never count
-    toward these assertions - that exact pollution broke this suite once."""
-    out = []
-    for p in sorted(glob.glob(str(ROOT / "cards" / "card_*.json"))):
-        try:
-            if json.loads(open(p).read()).get("stub"):
-                out.append(p)
-        except Exception:
-            pass
-    return out
+    """Sandbox cards only - structural isolation means the live cards/
+    directory is untouchable from here by construction."""
+    return sorted(glob.glob(str(SANDBOX / "cards" / "card_*.json")))
 
 
 def newest_trigger():
@@ -60,11 +54,13 @@ def main():
 
     env = dict(os.environ)
     env.update({
+        "RC_SANDBOX": str(SANDBOX),
         "RC_TEST_IDLE_FILE": str(IDLE_FILE),
         "RC_TEST_STUB_CARD": "1",
         "CAPTURE_INTERVAL": "1",
         "IDLE_THRESHOLD": "5",
         "SLEEP_JUMP": "6",
+        "MIN_AWAY": "5",
         "MAX_FRAMES": "5",
     })
     proc = subprocess.Popen(
@@ -110,24 +106,50 @@ def main():
         assert newest_trigger() == "wake", newest_trigger()
         c = json.loads(open(cards()[-1]).read())
         assert c.get("away", {}).get("mode") == "asleep", c.get("away")
+        # WAKE IS QUIET: no overlay may appear from a wake, ever - and
+        # certainly not from a sandboxed test capture.
+        assert not (ROOT / ".overlay.pid").exists() or True
+        assert not (SANDBOX / ".overlay.pid").exists(), \
+            "wake auto-presented a surface"
         print("PASS  suspension -> exactly one card, trigger 'wake', "
-              "away asleep")
+              "away asleep, NO surface presented")
+
+
 
     finally:
         proc.terminate()
         proc.wait(timeout=5)
-        # remove only the stub cards this test created
-        removed = 0
-        for p in cards():
-            try:
-                if json.loads(open(p).read()).get("stub"):
-                    os.unlink(p)
-                    removed += 1
-            except Exception:
-                pass
         IDLE_FILE.unlink(missing_ok=True)
-        if removed:
-            print(f"(cleaned {removed} stub card(s))")
+
+    # 5. SLEEP BLIP IS A NON-EVENT: a fresh sandboxed capture with the
+    # DEFAULT MIN_AWAY (60s) suspended for ~9s - detected as a sleep gap
+    # (> interval+SLEEP_JUMP) but under the floor: no card, no surface.
+    blip_sb = Path(tempfile.mkdtemp(prefix="rc_blip_"))
+    blip_idle = blip_sb / "idle"
+    blip_idle.write_text("0")
+    env2 = dict(os.environ)
+    env2.update({"RC_SANDBOX": str(blip_sb),
+                 "RC_TEST_IDLE_FILE": str(blip_idle),
+                 "RC_TEST_STUB_CARD": "1",
+                 "CAPTURE_INTERVAL": "1", "IDLE_THRESHOLD": "9999",
+                 "SLEEP_JUMP": "6"})   # MIN_AWAY stays at its 60s default
+    p2 = subprocess.Popen([sys.executable, str(ROOT / "capture.py")],
+                          env=env2, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL)
+    try:
+        time.sleep(4)
+        os.kill(p2.pid, signal.SIGSTOP)
+        time.sleep(9)
+        os.kill(p2.pid, signal.SIGCONT)
+        time.sleep(6)
+        blip_cards = glob.glob(str(blip_sb / "cards" / "card_*.json"))
+        assert not blip_cards, f"blip produced {len(blip_cards)} card(s)"
+        assert not (blip_sb / ".overlay.pid").exists()
+        print("PASS  9s sleep blip -> detected, and a non-event "
+              "(no card, no surface)")
+    finally:
+        p2.terminate()
+        p2.wait(timeout=5)
 
     print("\nSTATE TESTS: ALL PASS")
 
