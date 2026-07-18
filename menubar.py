@@ -75,12 +75,15 @@ class RecoveryCard(rumps.App):
         self.item_goal = rumps.MenuItem("No card yet", callback=self.open_window)
         self.item_next = rumps.MenuItem("", callback=self.open_window)
         self.item_park = rumps.MenuItem("Park it…", callback=self.park)
+        self.item_summon = rumps.MenuItem("Show my card  ⌃⌥⌘R",
+                                          callback=lambda _: self.summon())
         self.item_window = rumps.MenuItem("Open card window", callback=self.open_window)
         self.item_quit = rumps.MenuItem("Quit Recovery Card", callback=self.quit_app)
 
         self.menu = [
             self.item_state,
             None,
+            self.item_summon,
             self.item_capture,
             self.item_park,
             None,
@@ -95,6 +98,57 @@ class RecoveryCard(rumps.App):
         self.item_next.set_callback(None)
 
         self.ensure_backend()
+        self.hotkey_active = False
+        self._register_hotkey()
+
+    def _register_hotkey(self):
+        """Global summon: Ctrl+Option+Cmd+R, anywhere.
+
+        Uses an NSEvent global monitor, which needs Accessibility
+        permission for the launching process. Degrades silently - the
+        menu item and 'I'm back' remain - and doctor.py reports which
+        summon paths are live.
+        """
+        try:
+            from AppKit import NSEvent
+            MASK_KEYDOWN = 1 << 10
+            CMD, OPT, CTRL = 1 << 20, 1 << 19, 1 << 18
+            WANT = CMD | OPT | CTRL
+            KEY_R = 15
+
+            def on_key(event):
+                try:
+                    if (event.keyCode() == KEY_R
+                            and (event.modifierFlags() & WANT) == WANT):
+                        self.summon()
+                except Exception:
+                    pass
+
+            def on_key_local(event):
+                on_key(event)
+                return event
+
+            self._hk_global = NSEvent.\
+                addGlobalMonitorForEventsMatchingMask_handler_(
+                    MASK_KEYDOWN, on_key)
+            self._hk_local = NSEvent.\
+                addLocalMonitorForEventsMatchingMask_handler_(
+                    MASK_KEYDOWN, on_key_local)
+            self.hotkey_active = self._hk_global is not None
+        except Exception:
+            self.hotkey_active = False
+        try:  # doctor.py reads this
+            (ROOT / ".hotkey_state").write_text(
+                "active" if self.hotkey_active else
+                "inactive - grant Accessibility to the launching app")
+        except Exception:
+            pass
+
+    def summon(self):
+        try:
+            api("/api/summon", method="POST", payload={})
+        except Exception:
+            pass
 
     # --- backend ----------------------------------------------------------
 

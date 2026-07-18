@@ -126,6 +126,12 @@ def main():
         except Exception as e:
             check("overlay summon + dismiss round-trip", False, str(e))
 
+    # 6b. Both summon paths
+    hk = ROOT / ".hotkey_state"
+    hk_state = hk.read_text().strip() if hk.exists() else "unknown (menu bar not started this session)"
+    check("global hotkey (⌃⌥⌘R)", hk_state == "active", hk_state,
+          warn=hk_state != "active")
+
     # 7. Launch path (see PLite.app stub work): which process owns the
     # screen-recording permission this session.
     parent = "unknown"

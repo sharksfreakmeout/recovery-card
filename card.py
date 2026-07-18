@@ -363,7 +363,10 @@ def build_prompt(frames, park, corrections=None, active=None, parked=None,
         "  confidence  - high, medium, or low",
         "  evidence    - one sentence naming the specific things ON SCREEN "
         "that support this. Name the actual document, window, or content "
-        "you saw. Do not write vague phrases like 'the screen shows work'.",
+        "you saw, in human terms ('the terminal showing frame-timing logs "
+        "and your Claude window'). NEVER say 'Frame 1' or 'Frame 2' or "
+        "refer to screenshots as frames - the person never sees frames. "
+        "Do not write vague phrases like 'the screen shows work'.",
         "",
         "Rules that matter:",
         "- Describe only what you can actually see. Never invent a tool, "

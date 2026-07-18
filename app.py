@@ -1026,8 +1026,8 @@ PAGE = r"""
 <style>
   :root {
     --bg:#0f1115; --panel:#171a21; --line:#252a34;
-    --text:#e6e8ec; --dim:#8b93a1; --accent:#7aa2f7;
-    --good:#7bcf9e; --warn:#e0af68; --bad:#f7768e;
+    --text:#e6e8ec; --dim:#8b93a1; --accent:#4fd6be;
+    --good:#4fd6be; --warn:#e0af68; --bad:#f7768e;
   }
   @media (prefers-color-scheme: light) {
     :root {
@@ -1123,7 +1123,7 @@ PAGE = r"""
   li { margin:3px 0; }
   .said {
     margin-top:22px; padding:12px 16px; border-left:2px solid var(--accent);
-    background:rgba(122,162,247,.07); font-style:italic;
+    background:rgba(79,214,190,.07); font-style:italic;
   }
   .meta {
     margin-top:24px; padding-top:16px; border-top:1px solid var(--line);
@@ -1157,7 +1157,7 @@ PAGE = r"""
   .tally .bad { color:var(--bad); }
   .truth {
     margin:14px 0 6px; padding:10px 14px; border-left:2px solid var(--good);
-    background:rgba(123,207,158,.08); font-style:italic; font-size:13.5px;
+    background:rgba(79,214,190,.08); font-style:italic; font-size:13.5px;
   }
   .judge-row {
     display:flex; align-items:flex-start; gap:10px; padding:9px 0;
@@ -1588,8 +1588,8 @@ def choose_port():
 _BASE_CSS = r"""
   :root {
     --bg:#0f1115; --panel:#171a21; --line:#252a34;
-    --text:#e6e8ec; --dim:#8b93a1; --accent:#7aa2f7;
-    --good:#7bcf9e; --warn:#e0af68; --bad:#f7768e;
+    --text:#e6e8ec; --dim:#8b93a1; --accent:#4fd6be;
+    --good:#4fd6be; --warn:#e0af68; --bad:#f7768e;
   }
   * { box-sizing:border-box; }
   body {
@@ -1866,7 +1866,7 @@ BOARD_PAGE = r"""
     background:var(--panel); border:1px solid var(--line);
     border-radius:14px; padding:18px 22px; margin-bottom:10px;
   }
-  .thread.active { border-color:rgba(122,162,247,.5); padding:22px; }
+  .thread.active { border-color:rgba(79,214,190,.5); padding:22px; }
   .thread .name { font-weight:600; font-size:15.5px; }
   .thread.active .name { font-size:18px; }
   .thread .rp { color:var(--dim); font-size:13.5px; margin-top:4px; }
@@ -2022,7 +2022,7 @@ _CARD_ASSETS = r"""
   .next { font-size:16.5px; margin:0; }
   ul { margin:0; padding-left:20px; } li { margin:3px 0; }
   .said { margin-top:20px; padding:12px 16px; border-left:2px solid var(--accent);
-          background:rgba(122,162,247,.07); font-style:italic; }
+          background:rgba(79,214,190,.07); font-style:italic; }
   .meta { margin-top:22px; padding-top:14px; border-top:1px solid var(--line);
           font-size:12.5px; color:var(--dim); }
   .flag { display:inline-block; padding:3px 9px; border-radius:5px; font-size:11px;
@@ -2048,7 +2048,7 @@ _CARD_ASSETS = r"""
   .tally .ok { color:var(--good); } .tally .mid { color:var(--warn); }
   .tally .bad { color:var(--bad); }
   .truth { margin:14px 0 6px; padding:10px 14px; border-left:2px solid var(--good);
-           background:rgba(123,207,158,.08); font-style:italic; font-size:13.5px; }
+           background:rgba(79,214,190,.08); font-style:italic; font-size:13.5px; }
   .judge-row { display:flex; align-items:flex-start; gap:10px; padding:9px 0;
                border-bottom:1px solid var(--line); font-size:13.5px; }
   .judge-row:last-child { border-bottom:none; }
@@ -2122,7 +2122,7 @@ function renderCard(c) {
   slot.innerHTML = `
     <div class="card">
       ${flag}
-      ${c.thread ? `<div class="flag" style="background:rgba(122,162,247,.14);color:var(--accent)">${esc(c.thread)}</div>` : ""}
+      ${c.thread ? `<div class="flag" style="background:rgba(79,214,190,.14);color:var(--accent)">${esc(c.thread)}</div>` : ""}
       <h2>PICK UP HERE ${taps(f, "goal")}</h2>
       <p class="goal">${esc(c.goal)}</p>
       <div id="fix-goal"></div>
@@ -2542,8 +2542,8 @@ OVERLAY_PAGE = r"""
   .next { font-size:20px; margin:0; font-weight:450; }
   ul { margin:0; padding-left:20px; }
   li { margin:5px 0; }
-  .said { margin-top:26px; padding:14px 18px; border-left:2px solid #7aa2f7;
-          background:rgba(122,162,247,.10); font-style:italic;
+  .said { margin-top:26px; padding:14px 18px; border-left:2px solid #4fd6be;
+          background:rgba(79,214,190,.10); font-style:italic;
           border-radius:0 8px 8px 0; }
   .meta { margin-top:30px; padding-top:18px;
           border-top:1px solid rgba(255,255,255,.10);
@@ -2567,16 +2567,16 @@ OVERLAY_PAGE = r"""
   .taps button { padding:1px 7px; font-size:11px; border-radius:5px;
                  background:transparent; border:1px solid rgba(255,255,255,.15);
                  color:#8b93a1; cursor:pointer; }
-  .taps button.y.on { background:#7bcf9e; border-color:#7bcf9e; color:#0f1115; }
+  .taps button.y.on { background:#4fd6be; border-color:#4fd6be; color:#0f1115; }
   .taps button.n.on { background:#f7768e; border-color:#f7768e; color:#0f1115; }
   .fixbox { display:flex; gap:6px; margin:8px 0 2px; }
   .fixbox input { flex:1; font:inherit; font-size:13px; padding:7px 11px;
-                  border-radius:7px; border:1px solid #7aa2f7;
+                  border-radius:7px; border:1px solid #4fd6be;
                   background:rgba(0,0,0,.3); color:#f2f4f8; }
-  .fixed-note { margin:8px 0 2px; font-size:12.5px; color:#7bcf9e; }
+  .fixed-note { margin:8px 0 2px; font-size:12.5px; color:#4fd6be; }
   .waiting { text-align:center; color:#9aa3b2; }
   .spin { width:26px; height:26px; margin:0 auto 16px;
-          border:2px solid rgba(255,255,255,.18); border-top-color:#7aa2f7;
+          border:2px solid rgba(255,255,255,.18); border-top-color:#4fd6be;
           border-radius:50%; animation:spin 1s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
 </style>
@@ -2717,7 +2717,7 @@ async function draw() {
       <p class="goal">${esc(c.goal)}</p><div id="fix-goal"></div>
       <h2 style="margin-top:16px">WHY ${taps(f, "reasoning")}</h2>
       <p class="reason">${esc(c.reasoning)}</p><div id="fix-reasoning"></div>
-      <div class="sec"><h2>NEXT STEP ${taps(f, "next_action")}</h2>
+      <div class="sec"><h2 style="color:#e0af68">NEXT STEP ${taps(f, "next_action")}</h2>
         <p class="next">${esc(c.next_action)}</p><div id="fix-next_action"></div></div>
       ${loops?`<div class="sec"><h2>OPEN LOOPS ${taps(f, "open_loops")}</h2>
         <ul>${loops}</ul><div id="fix-open_loops"></div></div>`:""}
