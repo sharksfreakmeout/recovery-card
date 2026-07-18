@@ -17,6 +17,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -42,6 +43,42 @@ app = Flask(__name__)
 _capture_proc = None
 # Set while an on-demand card generation is running.
 _generating_since = None
+_gen_lock = threading.Lock()
+
+
+def start_generation(trigger):
+    """Run card generation OFF the request thread, always.
+
+    P0 lesson: generation on the serving thread froze every endpoint for
+    the full inference - the overlay could not poll, could not dismiss via
+    its fallback, and read as a stuck full-screen trap. Generation now
+    runs in a daemon thread; requests keep flowing; the overlay shows a
+    calm reconstructing state and stays dismissable throughout.
+
+    Returns False if a generation is already running (never stack them).
+    """
+    global _generating_since
+    with _gen_lock:
+        if _generating_since is not None:
+            return False
+        _generating_since = time.time()
+
+    def run():
+        global _generating_since
+        os.environ["RECOVERY_TRIGGER"] = trigger
+        try:
+            if os.environ.get("RC_TEST_SLOW_GEN"):
+                time.sleep(float(os.environ["RC_TEST_SLOW_GEN"]))
+            else:
+                card_mod.generate()
+        except Exception:
+            pass
+        finally:
+            os.environ.pop("RECOVERY_TRIGGER", None)
+            _generating_since = None
+
+    threading.Thread(target=run, daemon=True).start()
+    return True
 
 
 # --- Helpers --------------------------------------------------------------
@@ -303,6 +340,226 @@ def api_dismiss_emergent():
     return jsonify({"ok": True})
 
 
+# --- Thread map: resume, restore, node actions -----------------------------
+
+import events as events_mod
+
+
+def thread_cards(name, limit=8):
+    """Recent cards belonging to a thread, newest first. Read live."""
+    out = []
+    for p in card_files():
+        c = load_card(p)
+        if c and c.get("thread") == name:
+            out.append({"file": p.name,
+                        "at": c.get("generated_at", ""),
+                        "goal": c.get("goal", "")})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def restorable(t):
+    """What Resume can verifiably bring back: exact URLs and the app.
+
+    Honest by construction - scroll position, unsaved state and
+    workspace-within-app are not restorable and the UI says so.
+    """
+    items = []
+    for u in (t.get("recent_urls") or [])[-3:]:
+        items.append({"kind": "url", "value": u,
+                      "label": u.split("//")[-1][:60]})
+    if t.get("last_app"):
+        items.append({"kind": "app", "value": t["last_app"],
+                      "label": f"open {t['last_app']}"})
+    return items
+
+
+@app.route("/api/thread/<tid>/map")
+def api_thread_map(tid):
+    g = threads_mod.load()
+    t = g["threads"].get(tid)
+    if not t:
+        return jsonify({"ok": False, "error": "unknown thread"}), 404
+
+    vis, more = threads_mod.visible_nodes(g, tid)
+    parked_mins = None
+    if t.get("status") != "active" and t.get("last_seen"):
+        try:
+            parked_mins = int((datetime.now() - datetime.fromisoformat(
+                t["last_seen"])).total_seconds() / 60)
+        except Exception:
+            pass
+
+    h = t.get("return_point") or "No return-point yet."
+    if parked_mins is not None and parked_mins >= 1:
+        h += f" · parked {parked_mins} min" if parked_mins < 120 \
+            else f" · parked {parked_mins // 60} h"
+
+    return jsonify({
+        "ok": True,
+        "thread": {k: t.get(k) for k in
+                   ("id", "name", "status", "origin", "return_point",
+                    "last_seen")},
+        "headline": h,
+        "nodes": [{k: n.get(k) for k in
+                   ("id", "kind", "label", "pinned", "resolved", "sticky")}
+                  for n in vis],
+        "more_nodes": [{k: n.get(k) for k in ("id", "kind", "label",
+                                              "pinned", "resolved")}
+                       for n in more],
+        "cards": thread_cards(t["name"]),
+        "restorable": restorable(t),
+    })
+
+
+@app.route("/api/thread/<tid>/resume", methods=["POST"])
+def api_thread_resume(tid):
+    g = threads_mod.load()
+    if not threads_mod.resume_thread(g, tid):
+        return jsonify({"ok": False, "error": "unknown thread"}), 404
+    threads_mod.save(g)
+    events_mod.log_event("resume_click", thread=tid)
+    open_overlay()  # the Return Card surface, with the latest card
+    return jsonify({"ok": True})
+
+
+@app.route("/api/thread/<tid>/restore", methods=["POST"])
+def api_thread_restore(tid):
+    """Acts ONLY on what the user just previewed and confirmed."""
+    body = request.json or {}
+    g = threads_mod.load()
+    t = g["threads"].get(tid)
+    if not t:
+        return jsonify({"ok": False, "error": "unknown thread"}), 404
+    allowed = {(i["kind"], i["value"]) for i in restorable(t)}
+    opened = []
+    for item in (body.get("items") or [])[:5]:
+        key = (item.get("kind"), item.get("value"))
+        if key not in allowed:
+            continue  # never act on anything that wasn't previewed
+        if key[0] == "url":
+            subprocess.run(["open", key[1]], capture_output=True, timeout=10)
+        elif key[0] == "app":
+            subprocess.run(["open", "-a", key[1]], capture_output=True,
+                           timeout=10)
+        opened.append(item.get("label", key[1]))
+    return jsonify({"ok": True, "opened": opened})
+
+
+@app.route("/api/node/<nid>", methods=["POST"])
+def api_node_action(nid):
+    """Every map correction, one endpoint. All of them are ground truth."""
+    body = request.json or {}
+    action = body.get("action", "")
+    g = threads_mod.load()
+    n = threads_mod.get_node(g, nid)
+    if not n:
+        return jsonify({"ok": False, "error": "unknown node"}), 404
+
+    truth = {"node": n["label"], "kind": n["kind"], "action": action}
+
+    if action == "rename":
+        new = " ".join((body.get("value") or "").split())[:80]
+        if not new:
+            return jsonify({"ok": False, "error": "a name is needed"}), 400
+        old = n["label"]
+        n["label"] = new
+        threads_mod.set_sticky(g, new, n["thread"])
+        truth["from"], truth["to"] = old, new
+    elif action == "move":
+        dest = body.get("thread", "")
+        if dest not in g["threads"]:
+            return jsonify({"ok": False, "error": "unknown thread"}), 400
+        n["thread"] = dest
+        n["sticky"] = True
+        threads_mod.set_sticky(g, n["label"], dest)
+        # the correction reshapes both centroids via the label embedding
+        vec = threads_mod.embed(n["label"])[0]
+        threads_mod.feed_embedding(g, dest, vec)
+        truth["to"] = dest
+    elif action == "detach":
+        n["thread"] = None
+        truth["to"] = "unfiled"
+    elif action == "remove":
+        g["nodes"] = [x for x in g["nodes"] if x["id"] != nid]
+    elif action == "resolve":
+        n["resolved"] = True
+        # a resolved blocker changes what the return-point should say
+        t = g["threads"].get(n["thread"])
+        if t and n["kind"] in ("blocker", "decision") and \
+                n["label"].lower() in (t.get("return_point") or "").lower():
+            t["return_point"] = f"{n['label']} is resolved — pick up from there."
+    elif action in ("pin", "unpin"):
+        n["pinned"] = action == "pin"
+    else:
+        return jsonify({"ok": False, "error": "unknown action"}), 400
+
+    threads_mod.save(g)
+    # Corrections are ground truth: they go to the eval store.
+    try:
+        truth["at"] = datetime.now().isoformat(timespec="seconds")
+        p = ROOT / "eval" / "map_corrections.json"
+        rows = json.loads(p.read_text()) if p.exists() else []
+        rows.append(truth)
+        p.write_text(json.dumps(rows[-200:], indent=1))
+    except Exception:
+        pass
+    return jsonify({"ok": True})
+
+
+@app.route("/api/node/<nid>/why")
+def api_node_why(nid):
+    """Provenance on request: what created this node, when last seen."""
+    g = threads_mod.load()
+    n = threads_mod.get_node(g, nid)
+    if not n:
+        return jsonify({"ok": False}), 404
+    return jsonify({"ok": True, "label": n["label"],
+                    "first_seen": n.get("first_seen"),
+                    "last_seen": n.get("last_seen"),
+                    "sources": n.get("sources", []),
+                    "sticky": n.get("sticky", False)})
+
+
+@app.route("/api/thread/<tid>/node/add", methods=["POST"])
+def api_node_add(tid):
+    body = request.json or {}
+    g = threads_mod.load()
+    n = threads_mod.upsert_node(
+        g, tid, body.get("kind", "task"), body.get("label", ""),
+        source="user", sticky=True)
+    if not n:
+        return jsonify({"ok": False, "error": "could not add"}), 400
+    threads_mod.save(g)
+    return jsonify({"ok": True, "id": n["id"]})
+
+
+@app.route("/api/thread/merge", methods=["POST"])
+def api_thread_merge():
+    body = request.json or {}
+    g = threads_mod.load()
+    if not threads_mod.merge_threads(g, body.get("keep", ""),
+                                     body.get("absorb", "")):
+        return jsonify({"ok": False, "error": "could not merge"}), 400
+    threads_mod.save(g)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/thread/<tid>/archive", methods=["POST"])
+def api_thread_archive(tid):
+    g = threads_mod.load()
+    if not threads_mod.archive_thread(g, tid):
+        return jsonify({"ok": False, "error": "unknown thread"}), 404
+    threads_mod.save(g)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/metrics")
+def api_metrics():
+    return jsonify(events_mod.resumptions())
+
+
 # --- Trust dashboard API ---------------------------------------------------
 # Contract: everything here is read live from the real files on disk when
 # the request arrives. No cached claims. Every control is real.
@@ -521,20 +778,10 @@ def api_capture(action):
 
 @app.route("/api/generate", methods=["POST"])
 def api_generate():
-    """The 'I'm back' path when no card is waiting."""
-    global _generating_since
-    if _generating_since is not None:
-        return jsonify({"ok": False, "note": "already generating"})
-    _generating_since = time.time()
-    os.environ["RECOVERY_TRIGGER"] = "im_back"  # provenance, see card.py
-    try:
-        card_mod.generate()
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-    finally:
-        _generating_since = None
-        os.environ.pop("RECOVERY_TRIGGER", None)
+    """The 'I'm back' path when no card is waiting. Returns immediately;
+    the generation runs in the background and state polling shows it."""
+    started = start_generation("im_back")
+    return jsonify({"ok": True, "started": started})
 
 
 @app.route("/api/summon", methods=["POST", "GET"])
@@ -563,24 +810,40 @@ def api_summon():
     if fresh or _generating_since is not None:
         return jsonify({"ok": True, "generated": False, "card": bool(c)})
 
-    _generating_since = time.time()
-    os.environ["RECOVERY_TRIGGER"] = "hotkey"
-    try:
-        card_mod.generate()
-        return jsonify({"ok": True, "generated": True})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-    finally:
-        _generating_since = None
-        os.environ.pop("RECOVERY_TRIGGER", None)
+    started = start_generation("hotkey")
+    return jsonify({"ok": True, "generated": started})
 
 
 _overlay_proc = None
 
 
+OVERLAY_PIDFILE = ROOT / ".overlay.pid"
+
+
+def overlay_running():
+    """True if ANY overlay process exists - ours or one capture spawned.
+
+    Two spawn paths (summon, wake) that don't know about each other were
+    stacking overlays; the top one dismissed and the one beneath read as
+    'Esc does nothing'. One overlay, ever.
+
+    Detection is by pidfile, not pgrep -f: command-line matching caught
+    any process that merely mentioned overlay.py and silently skipped
+    legitimate spawns.
+    """
+    if _overlay_proc and _overlay_proc.poll() is None:
+        return True
+    try:
+        pid = int(OVERLAY_PIDFILE.read_text().strip())
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
 def open_overlay():
     global _overlay_proc
-    if _overlay_proc and _overlay_proc.poll() is None:
+    if overlay_running():
         return
     _overlay_proc = subprocess.Popen(
         [sys.executable, str(ROOT / "overlay.py"),
@@ -590,16 +853,20 @@ def open_overlay():
 
 @app.route("/api/overlay/close", methods=["POST"])
 def api_overlay_close():
-    """Last-resort dismissal. A full-screen overlay must never be a trap."""
+    """Last-resort dismissal. A full-screen overlay must never be a trap.
+
+    Deleting the pidfile is the kill switch: the overlay's watchdog thread
+    exits within 100ms of noticing. Signals cannot do this - the overlay's
+    main thread lives inside Cocoa's run loop where Python signal handlers
+    never get to run.
+    """
     global _overlay_proc
-    killed = False
-    if _overlay_proc and _overlay_proc.poll() is None:
-        _overlay_proc.terminate()
-        killed = True
-    else:
-        subprocess.run(["pkill", "-f", "overlay.py"], capture_output=True)
-        killed = True
-    return jsonify({"ok": killed})
+    OVERLAY_PIDFILE.unlink(missing_ok=True)
+    if _overlay_proc:
+        proc = _overlay_proc
+        # reap promptly so the dead overlay never lingers as a zombie
+        threading.Thread(target=lambda: proc.wait(), daemon=True).start()
+    return jsonify({"ok": True})
 
 
 @app.route("/overlay")
@@ -2404,15 +2671,22 @@ async function draw() {
   lastSig = sig;
 
   if (reconstructing) {
-    stage.innerHTML = `<div class="card waiting"><div class="spin"></div>
+    // Dismissable even here. A full-screen surface with no exit, at any
+    // moment, is a trap; the generation keeps running in the background
+    // and the finished card waits on the board.
+    stage.innerHTML = `<div class="card waiting">
+      <button class="x" onclick="close()" title="Dismiss">&times;</button>
+      <div class="spin"></div>
       <div>Reading your screens…</div>
-      <div class="hint" id="elapsed">${d.reconstructing_for ?? 0}s</div></div>`;
+      <div class="hint" id="elapsed">${d.reconstructing_for ?? 0}s</div>
+      <div class="hint">esc to dismiss — your card will be ready either way</div></div>`;
     return;
   }
 
   const c = d.card;
   if (!c) {
     stage.innerHTML = `<div class="card waiting">
+      <button class="x" onclick="close()" title="Dismiss">&times;</button>
       <div>No card yet.</div>
       <div class="hint">esc to dismiss</div></div>`;
     return;
@@ -2484,4 +2758,7 @@ if __name__ == "__main__":
         print("!" * 66)
 
     print(f"\n  Open http://localhost:{port} in your browser.\n")
-    app.run(host="127.0.0.1", port=port, debug=False)
+    # threaded=True is load-bearing: werkzeug's default is single-threaded,
+    # which froze every endpoint for the length of a card generation and
+    # turned the overlay into an undismissable full-screen trap.
+    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)

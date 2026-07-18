@@ -14,9 +14,12 @@ Escape, Return, Space, or a click outside the card dismisses it.
 Run:  .venv/bin/python overlay.py [base-url]
 """
 
+import atexit
+import os
 import sys
 import threading
 import time
+from pathlib import Path
 
 import webview
 
@@ -127,7 +130,39 @@ class Api:
             sys.exit(0)
 
 
+PIDFILE = Path(__file__).resolve().parent / ".overlay.pid"
+
+
+def _write_pidfile():
+    """Presence detection via pidfile. pgrep -f matched any process whose
+    command line merely CONTAINED 'overlay.py' - including shells running
+    test scripts - so spawns were silently skipped."""
+    try:
+        PIDFILE.write_text(str(os.getpid()))
+        atexit.register(lambda: PIDFILE.unlink(missing_ok=True))
+    except Exception:
+        pass
+
+    # Dismissal must be instant, and signals cannot deliver it: the main
+    # thread lives inside Cocoa's native run loop, where Python never gets
+    # a chance to run a signal handler. So the pidfile IS the kill switch:
+    # a watchdog thread notices its deletion and exits hard within 100ms.
+    my_pid = str(os.getpid())
+
+    def _watchdog():
+        while True:
+            time.sleep(0.1)
+            try:
+                if PIDFILE.read_text().strip() != my_pid:
+                    os._exit(0)
+            except Exception:
+                os._exit(0)   # pidfile gone = we were told to die
+
+    threading.Thread(target=_watchdog, daemon=True).start()
+
+
 if __name__ == "__main__":
+    _write_pidfile()
     # Deliberately NOT fullscreen=True. Native macOS fullscreen moves the
     # window into its own Space and animates there, which defeats the whole
     # point: we want to cover the desktop you are already looking at, with

@@ -512,12 +512,18 @@ def main():
     kept = skipped = 0
     card_fired = False  # so one absence triggers exactly one card
     last_cycle = time.time()
+    warmup = 2  # cycles before wake detection arms: launch must NEVER
+                # read as a wake, no matter what the clock did before start
 
     while True:
         cycle_start = time.time()
 
         # --- Wake detection. The return is certain: no idle threshold. ---
         gap = cycle_start - last_cycle
+        if warmup > 0:
+            warmup -= 1
+            _woke_event.clear()
+            gap = 0.0
         woke = _woke_event.is_set() or gap > CAPTURE_INTERVAL + SLEEP_JUMP
         if woke:
             _woke_event.clear()
@@ -529,6 +535,12 @@ def main():
             _slept_at["t"] = None
             summary = away_summary_text(away_secs, asleep=True)
             log(f"Woke from sleep. {summary}")
+            try:
+                import events
+                events.log_event("interruption", away="asleep",
+                                 idle_seconds=round(away_secs))
+            except Exception:
+                pass
             write_status("RECONSTRUCTING", card_started_at=time.time(),
                          away_summary=summary)
 
@@ -548,14 +560,22 @@ def main():
             prev_fp = None       # the screen has certainly changed
             landed_waiting = False
             write_status("CARD_READY", card_started_at=None)
-            # The return is certain, so the return surface appears on its
-            # own: the calm card-only view, nothing operational.
             try:
-                port = os.environ.get("PORT", "5001")
-                subprocess.Popen(
-                    [sys.executable, str(ROOT / "overlay.py"),
-                     f"http://localhost:{port}"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                import events
+                events.log_event("card_ready", trigger="wake")
+            except Exception:
+                pass
+            # The return is certain, so the return surface appears on its
+            # own: the calm card-only view, nothing operational. Never a
+            # second one - stacked overlays read as "Esc does nothing".
+            try:
+                if subprocess.run(["pgrep", "-f", "overlay.py"],
+                                  capture_output=True).returncode != 0:
+                    port = os.environ.get("PORT", "5001")
+                    subprocess.Popen(
+                        [sys.executable, str(ROOT / "overlay.py"),
+                         f"http://localhost:{port}"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception:
                 pass
         # Measured AFTER any card generation: a 30-second generation must
@@ -568,17 +588,33 @@ def main():
 
         if idle >= IDLE_THRESHOLD and not card_fired:
             log(f"Idle for {idle:.0f}s - you stepped away.")
+            try:
+                import events
+                events.log_event("interruption", away="awake",
+                                 idle_seconds=round(idle))
+            except Exception:
+                pass
             write_status("RECONSTRUCTING", card_started_at=time.time(),
                          away_summary=away_summary_text(idle, asleep=False))
             generate_card(f"idle {idle:.0f}s", trigger="idle",
                           away={"mode": "awake", "seconds": idle})
             card_fired = True
             write_status("CARD_READY", card_started_at=None)
+            try:
+                import events
+                events.log_event("card_ready", trigger="idle")
+            except Exception:
+                pass
             last_cycle = time.time()  # generation time is not a sleep gap
         elif idle < AWAY_AFTER and card_fired:
             log("Welcome back. Re-arming the idle trigger.")
             card_fired = False
             write_status("ACTIVE")
+            try:
+                import events
+                events.log_event("engaged")  # first input after a return
+            except Exception:
+                pass
         elif card_fired:
             write_status("CARD_READY")
         else:
@@ -701,6 +737,12 @@ def main():
             # Failure here must never stop capture.
             if T is not None:
                 try:
+                    # Reload before every write cycle. Holding the graph in
+                    # memory here silently clobbered every write the app
+                    # made between our saves - nodes, sticky assignments,
+                    # resumes, all lost. The file is small; reloading is
+                    # cheaper than being wrong.
+                    graph = T.load()
                     tid, tier, score = T.classify(graph, ctx)
                     active = T.update_affinity(graph, tid, ctx)
                     T.save(graph)
