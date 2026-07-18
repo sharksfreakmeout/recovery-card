@@ -312,6 +312,10 @@ def build_prompt(frames, park, corrections=None, active=None, parked=None,
         "seconds apart, oldest first. They were interrupted and have now "
         "come back. Reconstruct what they were doing so they can resume.",
         "",
+        "VOICE: the card speaks directly TO the person. Always second "
+        "person: 'You were drafting...', 'Reply to Marcus...'. Never 'the "
+        "user', never 'they'.",
+        "",
         "The frontmost window at each moment was:",
     ]
     for i, (f, meta) in enumerate(frames, 1):
@@ -326,13 +330,16 @@ def build_prompt(frames, park, corrections=None, active=None, parked=None,
         "",
         "Reply with JSON only. No prose outside the JSON.",
         "",
-        "  goal        - what they were trying to accomplish, one sentence",
-        "  reasoning   - why they were doing it, what the thinking was",
-        "  next_action - a DIRECT INSTRUCTION for the very next step, as if "
-        "telling them what to do ('Reply to Marcus about the infra cost'), "
-        "never a description of options",
-        "  open_loops  - up to 3 unfinished items, ORDERED BY CONSEQUENCE: "
-        "the one that costs most if forgotten comes first",
+        "  goal        - what you were trying to accomplish, one sentence, "
+        "second person ('You were...')",
+        "  reasoning   - why, what the thinking was, second person",
+        "  next_action - a DIRECT INSTRUCTION for the very next step "
+        "('Reply to Marcus about the infra cost'), never a description of "
+        "options",
+        "  open_loops  - up to 3 unfinished items FROM THE ACTIVE THREAD "
+        "ONLY, ordered by consequence: the one that costs most if forgotten "
+        "comes first. Other threads of work are NEVER open loops - they are "
+        "listed separately as parked threads and must not appear here.",
         "  confidence  - high, medium, or low",
         "  evidence    - one sentence naming the specific things ON SCREEN "
         "that support this. Name the actual document, window, or content "
@@ -341,6 +348,10 @@ def build_prompt(frames, park, corrections=None, active=None, parked=None,
         "Rules that matter:",
         "- Describe only what you can actually see. Never invent a tool, "
         "file, or command that is not visible.",
+        "- No hedging inside goal or next_action ('possibly', 'it seems', "
+        "'you may have been'). State it plainly; your uncertainty belongs "
+        "in the confidence field and nowhere else. When a park note or "
+        "their own composed words exist, there is nothing to hedge about.",
         "- If the screenshots are too thin to tell, say so plainly in goal "
         "and set confidence to low. An honest 'not enough signal' is far "
         "more useful than a confident guess.",
