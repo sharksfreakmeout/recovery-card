@@ -23,14 +23,38 @@ A three-stage local pipeline, time as the axis.
 - Malformed JSON: retry once, then produce a fail-closed card.
 
 ### Stage 3 — Interface (`app.py`)
-- Flask at `localhost:5000`.
-- Preflight on startup: Ollama reachable, model present, test screenshot contains real content. Plain-English fixes if not.
-- One large calm **"I'm back"** button revealing the latest card instantly. Only generate on demand if no card exists in 10 minutes, with a visible "reconstructing" state.
-- Card sections: **"Pick up here"** (goal + reasoning), **"Next step"**, **"Open loops"**, plus quiet confidence and evidence lines, and **"You said:"** when a park note exists.
-- A **"Park it"** one-line text box for stepping away (macOS dictation gives voice for free).
-- Status strip: model name, network state (must clearly show offline when network is down), last capture time, last card time.
-- History of past cards below.
-- Calm, minimal, zero cognitive load.
+
+`app.py` is both the user surface and the live demo control room: one Flask
+page at `localhost:5000`, calm and minimal, dark-friendly.
+
+**Top — status strip.** Model name, network state (clearly shows OFFLINE when
+down), frames captured, last capture time, last card time.
+
+**Control.** A Start/Stop capture button that launches and stops `capture.py`
+as a subprocess, so the whole demo runs from the browser without terminal
+juggling.
+
+**Live state — the centerpiece.** A live-updating panel (2-second polling is
+fine, no websockets) showing the current mode:
+- `ACTIVE` — user present, capturing. Subtle heartbeat with frames kept.
+- `AWAY` — counter of seconds since last input, ticking live.
+- `RECONSTRUCTING` — idle threshold crossed, card generation running, elapsed
+  seconds shown.
+- `CARD READY`.
+
+`capture.py` writes its state to a small status file that `app.py` reads.
+
+**Card.** When ready, the newest card displayed large: **"Pick up here"**
+(goal + reasoning), **"Next step"**, **"Open loops"**, quiet confidence and
+evidence lines, and **"You said:"** when a park note exists.
+
+**Park it.** One-line text box saving a timestamped park note (macOS dictation
+supplies voice).
+
+**History.** Past cards below, timestamped.
+
+**Preflight on startup.** Ollama reachable, model present, test screenshot
+contains real content. Plain-English fixes if not.
 
 ### `eval.py`
 - Park notes double as ground truth.
