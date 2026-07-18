@@ -171,9 +171,12 @@ if __name__ == "__main__":
     # does not.
     screen = webview.screens[0]
 
+    # BASE may already be a full overlay URL (e.g. a specific read-only
+    # card summoned from the thread map's timeline).
+    target_url = BASE if "/overlay" in BASE else f"{BASE}/overlay"
     webview.create_window(
         "Recovery Card",
-        f"{BASE}/overlay",
+        target_url,
         js_api=Api(),
         width=screen.width,
         height=screen.height,

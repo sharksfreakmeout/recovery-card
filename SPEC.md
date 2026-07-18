@@ -264,6 +264,9 @@ where an AI restates it back. Opposite things; never confused.
 
 - Consented chat-history connectors (full logs with explicit user consent) —
   the real-Phossil path beyond visible-surface capture.
+- Thread splitting (one thread becomes two, history divided).
+- Edge-type editing on the map.
+- Time-scrubbed map playback (watch a thread's day reconstruct itself).
 
 - Calendar federation (Google multi-account + Notion) as the next context
   layer, with explicit consent.

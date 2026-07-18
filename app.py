@@ -262,6 +262,15 @@ def engine_room():
     return render_template_string(PAGE)
 
 
+@app.route("/thread/<tid>")
+def thread_map_page(tid):
+    """A thread's map. The page pulls its thread id from the URL."""
+    g = threads_mod.load()
+    if tid not in g["threads"]:
+        return render_template_string(BOARD_PAGE)  # calm way back
+    return render_template_string(MAP_PAGE)
+
+
 # --- Thread + board API ---------------------------------------------------
 
 def headline(g, st):
@@ -851,6 +860,26 @@ def open_overlay():
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+@app.route("/api/overlay/show", methods=["POST"])
+def api_overlay_show():
+    """Open the Return surface on a SPECIFIC card, read-only.
+
+    Used by the thread map's timeline. Replaces any overlay already up.
+    """
+    card = request.args.get("card", "")
+    if not re.match(r"^card_\d{8}_\d{6}\.json$", card):
+        return jsonify({"ok": False, "error": "unknown card"}), 400
+    OVERLAY_PIDFILE.unlink(missing_ok=True)   # watchdog closes the old one
+    time.sleep(0.15)
+    global _overlay_proc
+    port = request.host.split(":")[-1]
+    _overlay_proc = subprocess.Popen(
+        [sys.executable, str(ROOT / "overlay.py"),
+         f"http://localhost:{port}/overlay?card={card}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/overlay/close", methods=["POST"])
 def api_overlay_close():
     """Last-resort dismissal. A full-screen overlay must never be a trap.
@@ -1233,10 +1262,30 @@ PAGE = r"""
   <div class="scoring" id="scoring"></div>
 
   <div class="hist" id="hist"></div>
+
+  <div class="scoring" style="margin-top:18px">
+    <h2 style="font-size:11px;letter-spacing:.14em;color:var(--dim);
+               font-weight:600;margin:0 0 10px">TIME TO ENGAGED WORK</h2>
+    <div id="metrics" style="font-size:13px;color:var(--dim)">no resumptions
+      measured yet</div>
+  </div>
 </div>
 
 <script>
 let running = false;
+
+async function drawMetrics() {
+  let m;
+  try { m = await (await fetch("/api/metrics")).json(); } catch(e){ return; }
+  const el = document.getElementById("metrics");
+  if (!m.count) return;
+  el.innerHTML = `median <b>${m.median_seconds}s</b> across ${m.count} ` +
+    `resumption(s)<br>` + m.recent.slice(0,6).map(r =>
+      `${r.seconds}s <span style="opacity:.6">(via ${r.via.replace("_"," ")}` +
+      `${r.thread ? " · " + r.thread : ""})</span>`).join("<br>");
+}
+setInterval(drawMetrics, 5000);
+drawMetrics();
 
 function esc(s) {
   return (s || "").replace(/[&<>"]/g, c =>
@@ -1929,9 +1978,12 @@ async function tickBoard() {
   const threads = (b.threads || []).filter(t => t.status !== "ambient");
   document.getElementById("threads-title").style.display =
     threads.length ? "" : "none";
+  // Every row is clickable through to that thread's map - and nothing
+  // else happens on the row (DESIGN.md board spec).
   host.innerHTML = threads.map(t => {
     const act = t.id === b.active;
-    return `<div class="thread ${act ? "active" : ""}">
+    return `<div class="thread ${act ? "active" : ""}" style="cursor:pointer"
+                 onclick="location.href='/thread/${t.id}'">
       <div class="tag ${act ? "act" : ""}">${act ? "ACTIVE NOW" :
         (t.origin === "emergent" ? "EMERGENT · HELD" : "HELD")}</div>
       <div class="name">${esc(t.name)}</div>
@@ -2236,6 +2288,340 @@ document.addEventListener("visibilitychange", () => {
 tick(); tickBoard();
 setInterval(tick, 2500);
 setInterval(tickBoard, 3000);
+</script>
+</body>
+</html>
+"""
+
+
+MAP_PAGE = r"""
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PLite — thread</title>
+<style>
+""" + _BASE_CSS + r"""
+  .back-link { color:var(--dim); text-decoration:none; font-size:13.5px; }
+  .back-link:hover { color:var(--text); }
+  .statustag { font-size:10.5px; letter-spacing:.12em; font-weight:600;
+               color:var(--dim); }
+  .statustag.active { color:#4fd6be; }
+  .thead { margin:10px 0 4px; font-size:22px; font-weight:600;
+           letter-spacing:-.01em; }
+  .theadline { color:var(--dim); font-size:14.5px; margin:0 0 24px; }
+
+  /* The map: thread centered, nodes on a ring. No drag, no zoom. */
+  #mapbox { position:relative; height:340px; margin:6px 0 10px; }
+  .center-chip {
+    position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    background:rgba(79,214,190,.12); border:1px solid rgba(79,214,190,.5);
+    color:var(--text); border-radius:14px; padding:12px 20px;
+    font-weight:600; font-size:15px; max-width:220px; text-align:center;
+    z-index:2;
+  }
+  .node {
+    position:absolute; transform:translate(-50%,-50%);
+    background:var(--panel); border:1px solid var(--line);
+    border-radius:12px; padding:8px 13px; font-size:12.5px; cursor:pointer;
+    max-width:170px; text-align:center; z-index:3;
+    transition:border-color .2s ease;
+  }
+  .node:hover { border-color:#4fd6be; }
+  .node .kind { display:block; font-size:10px; letter-spacing:.1em;
+                color:var(--dim); }
+  .node.blocker { border-color:rgba(247,118,142,.6);
+                  background:rgba(247,118,142,.07); }
+  .node.blocker .kind { color:#f7768e; }
+  .node.resolved { opacity:.5; }
+  .node.resolved .lbl { text-decoration:line-through; }
+  .node .pinmark { color:#e0af68; }
+  .edge { position:absolute; height:1px; background:var(--line);
+          transform-origin:0 0; z-index:1; }
+  .edge.blocker { background:rgba(247,118,142,.5); height:2px; }
+
+  .menu {
+    position:absolute; z-index:10; background:#1c2029;
+    border:1px solid var(--line); border-radius:12px; padding:6px;
+    box-shadow:0 12px 40px rgba(0,0,0,.5); min-width:190px;
+  }
+  .menu button { display:block; width:100%; text-align:left; border:none;
+                 background:none; padding:8px 12px; font-size:13.5px;
+                 border-radius:8px; }
+  .menu button:hover { background:rgba(255,255,255,.06); }
+  .menu button.danger { color:#f7768e; }
+  .menu .inline { padding:6px 8px; display:flex; gap:6px; }
+  .menu .inline input { font-size:13px; padding:6px 9px; }
+  .prov { padding:8px 12px; font-size:12.5px; color:var(--dim);
+          max-width:240px; }
+
+  .showmore { font-size:12.5px; color:var(--dim); background:none;
+              border:none; cursor:pointer; padding:4px 0; }
+  .showmore:hover { color:var(--text); }
+
+  .actions { display:flex; gap:10px; align-items:center; margin:18px 0; }
+  .restore { background:var(--panel); border:1px solid var(--line);
+             border-radius:12px; padding:14px 18px; margin:0 0 20px;
+             font-size:13.5px; }
+  .restore .item { padding:4px 0; display:flex; gap:8px; align-items:center; }
+  .restore .note { color:var(--dim); margin-top:8px; font-size:12.5px; }
+
+  h2.sect { font-size:11px; letter-spacing:.14em; color:var(--dim);
+            font-weight:600; margin:26px 0 10px; }
+  .tl-item { display:flex; gap:12px; padding:9px 0; font-size:13.5px;
+             border-bottom:1px solid var(--line); cursor:pointer; }
+  .tl-item:hover .goal { color:#4fd6be; }
+  .tl-item:last-child { border-bottom:none; }
+  .tl-item time { color:var(--dim); font-size:12px; white-space:nowrap;
+                  width:74px; flex:none; }
+  .addrow { display:flex; gap:8px; margin-top:10px; }
+  .quietrow { display:flex; gap:14px; margin-top:26px; font-size:12.5px; }
+  .quietbtn { background:none; border:none; color:var(--dim); cursor:pointer;
+              font-size:12.5px; padding:0; }
+  .quietbtn:hover { color:#f7768e; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p><a class="back-link" href="/">‹ Back to your threads</a></p>
+  <div class="statustag" id="ttag">…</div>
+  <div class="thead" id="tname">…</div>
+  <p class="theadline" id="thead">…</p>
+
+  <div id="mapbox"></div>
+  <button class="showmore" id="more" style="display:none"
+          onclick="showAll=!showAll; draw()">show more</button>
+
+  <div class="actions">
+    <button class="primary" onclick="resumeThread()">Resume this thread</button>
+  </div>
+  <div id="restore-slot"></div>
+
+  <div class="addrow">
+    <input type="text" id="addnode"
+           placeholder="Add something the capture didn't see — a person, doc, task…"
+           onkeydown="if(event.key==='Enter')addNode()">
+    <button onclick="addNode()">Add</button>
+  </div>
+
+  <h2 class="sect" id="tl-title" style="display:none">RECENT CARDS</h2>
+  <div id="timeline"></div>
+
+  <div class="quietrow">
+    <button class="quietbtn" onclick="mergeMenu(event)">Merge into another thread…</button>
+    <button class="quietbtn" onclick="archiveThread()">Archive — this is done</button>
+  </div>
+</div>
+<script>
+function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+const TID = decodeURIComponent(location.pathname.split("/").pop());
+let data = null, showAll = false, menuEl = null;
+
+function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
+document.addEventListener("click", e => {
+  if (menuEl && !e.target.closest(".menu") && !e.target.closest(".node"))
+    closeMenu();
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") { closeMenu(); }
+});
+
+async function load() {
+  let d;
+  try { d = await (await fetch(`/api/thread/${TID}/map`)).json(); }
+  catch (e) { return; }
+  if (!d.ok) { location.href = "/"; return; }
+  data = d;
+  draw();
+}
+
+function rel(iso) {
+  if (!iso) return "";
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 90) return "just now";
+  if (s < 3600) return Math.round(s/60) + "m ago";
+  if (s < 86400) return Math.round(s/3600) + "h ago";
+  return Math.round(s/86400) + "d ago";
+}
+
+function draw() {
+  const t = data.thread;
+  const tag = document.getElementById("ttag");
+  tag.textContent = t.status === "active" ? "ACTIVE NOW" :
+    (t.status === "archived" ? "ARCHIVED" : "HELD");
+  tag.className = "statustag " + (t.status === "active" ? "active" : "");
+  document.getElementById("tname").textContent = t.name;
+  document.getElementById("thead").textContent = data.headline;
+
+  // map
+  const box = document.getElementById("mapbox");
+  const W = box.clientWidth, H = box.clientHeight;
+  const cx = W/2, cy = H/2;
+  const nodes = showAll ? data.nodes.concat(data.more_nodes) : data.nodes;
+  const R = Math.min(W, H)/2 - 46;
+  let html = `<div class="center-chip">${esc(t.name)}</div>`;
+  nodes.forEach((n, i) => {
+    const a = (2*Math.PI*i)/nodes.length - Math.PI/2;
+    const x = cx + R*Math.cos(a), y = cy + R*Math.sin(a);
+    const len = Math.hypot(x-cx, y-cy);
+    const ang = Math.atan2(y-cy, x-cx);
+    html += `<div class="edge ${n.kind==="blocker"&&!n.resolved?"blocker":""}"
+      style="left:${cx}px;top:${cy}px;width:${len}px;
+             transform:rotate(${ang}rad)"></div>`;
+    html += `<div class="node ${n.kind==="blocker"&&!n.resolved?"blocker":""}
+                  ${n.resolved?"resolved":""}"
+                  style="left:${x}px;top:${y}px"
+                  onclick="nodeMenu(event,'${n.id}')">
+      <span class="kind">${n.pinned?'<span class="pinmark">●</span> ':""}${esc(n.kind)}</span>
+      <span class="lbl">${esc(n.label)}</span></div>`;
+  });
+  box.innerHTML = html;
+  document.getElementById("more").style.display =
+    data.more_nodes.length ? "" : "none";
+  document.getElementById("more").textContent = showAll
+    ? "show fewer" : `show ${data.more_nodes.length} more`;
+
+  // restore offer (quiet, honest)
+  const rs = document.getElementById("restore-slot");
+  if (data.restorable.length) {
+    rs.innerHTML = `<div class="restore">
+      I can bring back: ${data.restorable.map(r =>
+        `<div class="item">↳ ${esc(r.label)}</div>`).join("")}
+      <div class="note">The rest is on the card — scroll position, unsaved
+        work and app layouts can't be restored.</div>
+      <div style="margin-top:10px">
+        <button onclick="restoreAll()">Bring these back</button>
+      </div></div>`;
+  } else rs.innerHTML = "";
+
+  // timeline
+  const tl = document.getElementById("timeline");
+  document.getElementById("tl-title").style.display =
+    data.cards.length ? "" : "none";
+  tl.innerHTML = data.cards.map(c =>
+    `<div class="tl-item" onclick="openCard('${c.file}')">
+       <time>${rel(c.at)}</time><div class="goal">${esc(c.goal)}</div>
+     </div>`).join("");
+}
+
+function nodeMenu(ev, nid) {
+  ev.stopPropagation();
+  closeMenu();
+  const all = data.nodes.concat(data.more_nodes);
+  const n = all.find(x => x.id === nid);
+  menuEl = document.createElement("div");
+  menuEl.className = "menu";
+  menuEl.style.left = Math.min(ev.pageX, window.innerWidth-230) + "px";
+  menuEl.style.top = ev.pageY + "px";
+  menuEl.innerHTML = `
+    <div class="inline"><input id="rn" value="${esc(n.label)}"
+      onkeydown="if(event.key==='Enter')act('${nid}','rename',
+        {value:document.getElementById('rn').value})"></div>
+    <button onclick="moveMenu('${nid}')">Move to another thread…</button>
+    ${["blocker","decision"].includes(n.kind) && !n.resolved ?
+      `<button onclick="act('${nid}','resolve')">Mark resolved</button>` : ""}
+    <button onclick="act('${nid}','${n.pinned?"unpin":"pin"}')">
+      ${n.pinned ? "Unpin" : "Pin — always show this"}</button>
+    <button onclick="whyMenu('${nid}')">Why is this here?</button>
+    <button onclick="act('${nid}','detach')">Detach from this thread</button>
+    <button class="danger" onclick="act('${nid}','remove')">Not a thing — remove</button>`;
+  document.body.appendChild(menuEl);
+}
+
+function moveMenu(nid) {
+  fetch("/api/board").then(r=>r.json()).then(b => {
+    if (!menuEl) return;
+    menuEl.innerHTML = b.threads.filter(t => t.id !== TID)
+      .map(t => `<button onclick="act('${nid}','move',{thread:'${t.id}'})">
+        ${esc(t.name)}</button>`).join("") ||
+      `<div class="prov">No other threads yet.</div>`;
+  });
+}
+
+function whyMenu(nid) {
+  fetch(`/api/node/${nid}/why`).then(r=>r.json()).then(w => {
+    if (!menuEl) return;
+    const src = (w.sources||[]).map(s =>
+      s === "card" ? "seen on a card" :
+      s === "user" ? "you added it" : esc(s)).join(", ") || "unknown";
+    menuEl.innerHTML = `<div class="prov">
+      First noticed ${rel(w.first_seen)} · last seen ${rel(w.last_seen)}.<br>
+      How it got here: ${src}.${w.sticky ?
+        "<br>You placed it here — it stays unless you move it." : ""}</div>`;
+  });
+}
+
+async function act(nid, action, extra) {
+  closeMenu();
+  await fetch(`/api/node/${nid}`, {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({action, ...(extra||{})})});
+  // Quiet confirmation, no popups: the map redraws with the truth.
+  load();
+}
+
+async function addNode() {
+  const i = document.getElementById("addnode");
+  if (!i.value.trim()) return;
+  await fetch(`/api/thread/${TID}/node/add`, {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({label:i.value.trim(), kind:"task"})});
+  i.value = "";
+  i.placeholder = "Added — I'll remember that.";
+  load();
+}
+
+async function resumeThread() {
+  await fetch(`/api/thread/${TID}/resume`, {method:"POST"});
+  load();
+}
+
+async function restoreAll() {
+  const r = await (await fetch(`/api/thread/${TID}/restore`, {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({items:data.restorable})})).json();
+  const rs = document.getElementById("restore-slot");
+  rs.innerHTML = `<div class="restore">Brought back:
+    ${(r.opened||[]).map(o=>`<div class="item">✓ ${esc(o)}</div>`).join("")
+    || "nothing could be reopened"}</div>`;
+}
+
+function openCard(file) {
+  fetch(`/api/overlay/show?card=${encodeURIComponent(file)}`,
+        {method:"POST"});
+}
+
+function mergeMenu(ev) {
+  closeMenu();
+  fetch("/api/board").then(r=>r.json()).then(b => {
+    menuEl = document.createElement("div");
+    menuEl.className = "menu";
+    menuEl.style.left = Math.min(ev.pageX, window.innerWidth-230)+"px";
+    menuEl.style.top = ev.pageY+"px";
+    menuEl.innerHTML = `<div class="prov">Fold this thread into:</div>` +
+      (b.threads.filter(t => t.id !== TID).map(t =>
+        `<button onclick="mergeInto('${t.id}')">${esc(t.name)}</button>`)
+        .join("") || `<div class="prov">No other threads.</div>`);
+    document.body.appendChild(menuEl);
+  });
+  ev.stopPropagation();
+}
+
+async function mergeInto(keep) {
+  closeMenu();
+  await fetch("/api/thread/merge", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({keep, absorb:TID})});
+  location.href = "/thread/" + keep;
+}
+
+async function archiveThread() {
+  await fetch(`/api/thread/${TID}/archive`, {method:"POST"});
+  location.href = "/";
+}
+
+load();
+setInterval(load, 5000);
 </script>
 </body>
 </html>
@@ -2656,7 +3042,35 @@ async function saveFix(file, field) {
     `<div class="fixed-note">Saved. Later cards will treat that as truth.</div>`;
 }
 
+// A ?card= parameter shows one specific card, read-only: no taps, no
+// polling redraw. Used by the thread map's timeline.
+const READONLY_CARD = new URLSearchParams(location.search).get("card");
+
+async function drawReadonly() {
+  let c;
+  try { c = await (await fetch(`/cards/${READONLY_CARD}`)).json(); }
+  catch (e) { return; }
+  const loops = (c.open_loops||[]).map(l=>"<li>"+esc(l)+"</li>").join("");
+  document.getElementById("stage").innerHTML = `
+    <div class="card">
+      <button class="x" onclick="close()" title="Dismiss">&times;</button>
+      <p class="headline">An earlier card${c.thread ? " from " + esc(c.thread) : ""}
+        · ${esc((c.generated_at||"").replace("T"," "))}</p>
+      <h2>PICK UP HERE</h2>
+      <p class="goal">${esc(c.goal)}</p>
+      <p class="reason">${esc(c.reasoning)}</p>
+      <div class="sec"><h2 style="color:#e0af68">NEXT STEP</h2>
+        <p class="next">${esc(c.next_action)}</p></div>
+      ${loops?`<div class="sec"><h2>OPEN LOOPS</h2><ul>${loops}</ul></div>`:""}
+      ${c.park_note?`<div class="said">You said: “${esc(c.park_note)}”</div>`:""}
+      <div class="meta">confidence ${esc(c.confidence)}<br>
+        evidence: ${esc(c.evidence)}</div>
+    </div>
+    <div class="hint">esc to dismiss</div>`;
+}
+
 async function draw() {
+  if (READONLY_CARD) { return; }
   let d, b;
   try {
     d = await (await fetch("/api/state")).json();
@@ -2735,9 +3149,13 @@ async function draw() {
     <div class="hint">esc to dismiss</div>`;
 }
 
-draw();
-setInterval(draw, 2000);
-window.addEventListener("focus", draw);
+if (READONLY_CARD) {
+  drawReadonly();
+} else {
+  draw();
+  setInterval(draw, 2000);
+  window.addEventListener("focus", draw);
+}
 </script>
 </body>
 </html>
