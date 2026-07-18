@@ -1,0 +1,15 @@
+{
+  "about": "Two real threads back to back; both must be held with return-points.",
+  "steps": [
+    {"do": "focus", "app": "TextEdit"},
+    {"do": "type", "text": "PLite build notes: the return card needs the away line above the flags, per the design spec.\n"},
+    {"do": "focus", "app": "Notes"},
+    {"do": "type", "text": "Phossil production: agent is waiting on approval for the gate contract crosswalk. Review before merging.\n"},
+    {"do": "hands_off", "seconds": 35}
+  ],
+  "answer_key": {
+    "goal": "reviewing the Phossil gate contract crosswalk approval",
+    "next_action": "approve the gate contract crosswalk",
+    "active_thread": "phossil"
+  }
+}

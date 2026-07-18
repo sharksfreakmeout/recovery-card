@@ -1,0 +1,19 @@
+{
+  "about": "Stress: fast interleaving, misleading titles, work that looks like browsing. Failures here are findings, not bugs.",
+  "steps": [
+    {"do": "focus", "app": "TextEdit"},
+    {"do": "type", "text": "Shopping list draft (actually PLite copy testing): calm words for the return card. You were away 20 minutes. Pick up here.\n"},
+    {"do": "thrash", "times": 6, "apps": ["Finder", "Notes", "TextEdit"]},
+    {"do": "focus", "app": "Notes"},
+    {"do": "type", "text": "Vacation ideas (actually Phossil naming brainstorm): gate names, crosswalk, traceability register.\n"},
+    {"do": "thrash", "times": 5},
+    {"do": "focus", "app": "TextEdit"},
+    {"do": "type", "text": "One more pass on the return card copy, then ship it.\n"},
+    {"do": "hands_off", "seconds": 35}
+  ],
+  "answer_key": {
+    "goal": "refining the return card copy",
+    "next_action": "finish the copy pass and ship it",
+    "active_thread": "plite"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "about": "Interleaved threads, a genuine detour that must surface as emergent, a glance that must stay ambient.",
+  "steps": [
+    {"do": "focus", "app": "TextEdit"},
+    {"do": "type", "text": "PLite: tuning the thread map layout, blockers need more visual weight.\n", "shuffle_ok": true},
+    {"do": "focus", "app": "Notes", "shuffle_ok": true},
+    {"do": "type", "text": "Phossil: issue triage for the capture runtime, three open reports.\n", "shuffle_ok": true},
+    {"do": "focus", "app": "TextEdit"},
+    {"do": "type", "text": "Detour: MacBook speaker crackling at low volume. Genius Bar or third-party repair? Check AppleCare status first, then repair cost estimates.\n"},
+    {"do": "scroll", "times": 2},
+    {"do": "type", "text": "Speaker repair notes: out of warranty likely, estimate range 150 to 300.\n"},
+    {"do": "glance", "app": "Finder"},
+    {"do": "hands_off", "seconds": 35}
+  ],
+  "answer_key": {
+    "goal": "researching the MacBook speaker repair",
+    "next_action": "check the AppleCare status",
+    "detour_expected": true,
+    "glance_topic": "finder",
+    "active_thread": "speaker"
+  }
+}

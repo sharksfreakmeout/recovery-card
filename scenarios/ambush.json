@@ -1,0 +1,18 @@
+{
+  "about": "The demo beat: work on the Maya PRD, park, hands off. Card must be waiting.",
+  "steps": [
+    {"do": "focus", "app": "TextEdit"},
+    {"do": "type", "text": "Atlas Mobile Q3 launch PRD, working notes.\nMetrics section: reconcile the conversion target with the March research numbers before leadership review.\n"},
+    {"do": "scroll", "times": 2},
+    {"do": "type", "text": "Open question for Marcus: infra cost of bundling push notifications.\n"},
+    {"do": "park", "text": "drafting the metrics section, next: reconcile conversion target against March research"},
+    {"do": "hands_off", "seconds": 35}
+  ],
+  "answer_key": {
+    "goal": "drafting the metrics section of the Atlas Mobile PRD",
+    "next_action": "reconcile the conversion target against the March research numbers",
+    "open_loops_contains": ["infra cost of bundling push notifications"],
+    "park_note": "drafting the metrics section, next: reconcile conversion target against March research",
+    "active_thread": "atlas"
+  }
+}

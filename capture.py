@@ -725,6 +725,9 @@ def main():
 
             ctx["timestamp"] = datetime.now().isoformat(timespec="seconds")
             ctx["frame"] = final.name
+            if os.environ.get("RC_REHEARSAL") or \
+                    (ROOT / ".rehearsal_on").exists():
+                ctx["rehearsal"] = True  # fence: never mixes with real data
             ctx["diff_from_previous"] = round(dist, 2) if prev_fp else None
             ctx["engagement"] = snap
             if switches.get("clipboard", True):

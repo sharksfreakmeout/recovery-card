@@ -132,6 +132,18 @@ def main():
     check("global hotkey (⌃⌥⌘R)", hk_state == "active", hk_state,
           warn=hk_state != "active")
 
+    # 6c. Rehearsal driver: keystroke synthesis needs Accessibility for
+    # the process that runs `plite rehearse` (this terminal).
+    try:
+        from ApplicationServices import AXIsProcessTrusted
+        trusted = bool(AXIsProcessTrusted())
+    except Exception:
+        trusted = False
+    check("rehearsal driver (Accessibility)", trusted,
+          "granted" if trusted else
+          "System Settings > Privacy & Security > Accessibility: enable "
+          "the app you run `plite rehearse` from", warn=not trusted)
+
     # 7. Launch path: recorded by the launcher itself, because nohup
     # detaches the engine and process ancestry loses the stub.
     lp = ROOT / "logs" / "launch_path"

@@ -561,6 +561,9 @@ def generate():
     if away_mode:
         card["away"] = {"mode": away_mode, "seconds": away_secs}
 
+    if os.environ.get("RC_REHEARSAL") or \
+            (ROOT / ".rehearsal_on").exists():
+        card["rehearsal"] = True  # fence: excluded from human tallies
     card["generated_at"] = datetime.now().isoformat(timespec="seconds")
     card["frames_used"] = [f.name for f, _ in frames]
     # Who asked for this card: the idle watcher, the "I'm back" button, the

@@ -64,6 +64,8 @@ def scored_cards():
             c = json.loads(p.read_text())
         except Exception:
             continue
+        if c.get("rehearsal"):
+            continue  # fence: rehearsal data never mixes into human tallies
         if c.get("park_note", "").strip():
             out.append((p, c))
     return out

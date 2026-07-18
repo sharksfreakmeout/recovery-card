@@ -33,3 +33,5 @@ trust_settings.json
 .overlay.pid
 .menubar.pid
 .hotkey_state
+.rehearsal_on
+.banner.pid
