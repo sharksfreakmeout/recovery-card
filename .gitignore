@@ -1,5 +1,27 @@
-captures/
+# Real screenshots must never reach the public repo.
+captures/*
+!captures/.gitkeep
+
+# Belt and braces: no image file, anywhere in this repo, ever.
+# A screenshot that escapes the captures/ rule still gets caught here.
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.webp
+
+# Generated cards describe real work in plain English. Keep them local.
+cards/*
+!cards/.gitkeep
+
+# Eval runs contain park notes, which are the user's own words.
+eval/*
+!eval/.gitkeep
+
 __pycache__/
 *.pyc
 .venv/
 venv/
+.DS_Store
