@@ -77,6 +77,8 @@ class RecoveryCard(rumps.App):
         self.item_park = rumps.MenuItem("Park it…", callback=self.park)
         self.item_summon = rumps.MenuItem("Show my card  ⌃⌥⌘R",
                                           callback=lambda _: self.summon())
+        self.item_demo = rumps.MenuItem("Run demo scenario",
+                                        callback=self.run_demo)
         self.item_window = rumps.MenuItem("Open card window", callback=self.open_window)
         self.item_quit = rumps.MenuItem("Quit PLite", callback=self.quit_app)
 
@@ -84,6 +86,7 @@ class RecoveryCard(rumps.App):
             self.item_state,
             None,
             self.item_summon,
+            self.item_demo,
             self.item_capture,
             self.item_park,
             None,
@@ -157,6 +160,17 @@ class RecoveryCard(rumps.App):
     def summon(self):
         try:
             api("/api/summon", method="POST", payload={})
+        except Exception:
+            pass
+
+    def run_demo(self, _):
+        """One press on stage: the demo-day scenario, demo mode, hands
+        off. Esc aborts it instantly; a failed step stops clean."""
+        try:
+            log = open(ROOT / "logs" / "demo.log", "a")
+            subprocess.Popen(
+                [PYTHON, str(ROOT / "rehearse.py"), "demo-day", "--demo"],
+                stdout=log, stderr=log, cwd=str(ROOT))
         except Exception:
             pass
 

@@ -76,9 +76,28 @@ def frontmost():
 
 
 class Driver:
-    def __init__(self, rng, report):
+    def __init__(self, rng, report, stop_on_fail=False):
         self.rng = rng
         self.report = report
+        self.stop_on_fail = stop_on_fail
+
+    # step: open a specific file in its app (deterministic focus - typing
+    # lands in THIS buffer, never whatever happened to be frontmost)
+    def s_open_file(self, step):
+        p = str(Path(step["path"]).expanduser())
+        app = step.get("app", "Cursor")
+        subprocess.run(["open", "-a", app, p], capture_output=True)
+        nap(2.2)
+        want = Path(p).name.lower()
+        ok_, title, _ = osa(
+            'tell application "System Events" to tell (first application '
+            'process whose frontmost is true) to get name of front window')
+        if want.split(".")[0] not in (title or "").lower():
+            self.report["failures"].append(
+                f"open_file: {want} did not become the focused window "
+                f"(front: {title!r})")
+            return False
+        return True
 
     def verify_focus(self, app, retried=False):
         nap(0.6)
@@ -203,6 +222,12 @@ class Driver:
         ok = fn(step)
         if not ok and step["do"] not in ("click",):
             self.report["failures"].append(f"step {step['do']} failed")
+        if not ok and self.stop_on_fail:
+            # On stage: stop cleanly, hand control back, say which step
+            # to do by hand. No flailing.
+            print(f"\n  STOPPED CLEAN at step '{step['do']}' - do that "
+                  "step by hand and the pipeline continues on its own.")
+            raise StepFail(step["do"])
 
 
 # --- Variation engine ------------------------------------------------------
@@ -288,7 +313,34 @@ def grade(scenario, card, graph, t_card):
 
 # --- Runner ----------------------------------------------------------------
 
-def run_once(scenario, seed):
+class StepFail(Exception):
+    pass
+
+
+def resolve_targets(scenario):
+    """Verify every step's target exists on THIS machine before running.
+    Demo rule: never rely on a target we haven't resolved."""
+    ok = True
+    print("  resolving targets:")
+    for s in scenario["steps"]:
+        if s["do"] in ("focus", "glance"):
+            app = s["app"]
+            r = osa(f'tell application "System Events" to (name of every '
+                    f'application process) contains "{app}"')[1]
+            installed = Path(f"/Applications/{app}.app").exists() or \
+                Path(f"/System/Applications/{app}.app").exists() or \
+                r == "true"
+            print(f"    {'ok  ' if installed else 'MISS'} app: {app}"
+                  + ("" if installed else "  <- not found on this machine"))
+            ok = ok and installed
+        elif s["do"] == "open_file":
+            p = Path(s["path"]).expanduser()
+            print(f"    {'ok  ' if p.exists() else 'MISS'} file: {p}")
+            ok = ok and p.exists()
+    return ok
+
+
+def run_once(scenario, seed, demo=False):
     import threads as T
     rng = random.Random(seed)
     report = {"seed": seed, "scenario": scenario["name"],
@@ -296,21 +348,33 @@ def run_once(scenario, seed):
               "retries": [], "ax_fallbacks": [], "failures": [],
               "injected_distractors": 0, "aborted": False}
 
-    banner = subprocess.Popen(
-        [sys.executable, str(ROOT / "banner.py")],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    banner = None
+    env_flag = ROOT / ".rehearsal_on"
+    if not demo:
+        # FENCES (rehearsal mode): banner + tagging. Demo mode runs
+        # first-class against live state - the presenter discloses
+        # verbally; Esc abort and clean-stop remain identical.
+        banner = subprocess.Popen(
+            [sys.executable, str(ROOT / "banner.py")],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        env_flag.write_text("1")
+        os.environ["RC_REHEARSAL"] = "1"
     baseline = set((ROOT / "cards").glob("card_*.json"))
     t0 = None
 
-    env_flag = ROOT / ".rehearsal_on"
-    env_flag.write_text("1")   # capture reads RC_REHEARSAL from env; the
-    # engine was started by the user, so tag via env for OUR spawned gen
-    os.environ["RC_REHEARSAL"] = "1"
-
     try:
-        steps, injected = vary(scenario["steps"], rng)
+        if demo:
+            steps, injected = list(scenario["steps"]), 0  # no distractors
+            if not resolve_targets(scenario):
+                print("  DEMO ABORTED: unresolved targets above. Nothing "
+                      "was driven.")
+                report["aborted"] = True
+                report["passed"] = False
+                raise Abort()
+        else:
+            steps, injected = vary(scenario["steps"], rng)
         report["injected_distractors"] = injected
-        drv = Driver(rng, report)
+        drv = Driver(rng, report, stop_on_fail=demo)
         for step in steps:
             print(f"  · {step['do']}"
                   + (f" {step.get('app', '')}" if step.get("app") else "")
@@ -342,6 +406,10 @@ def run_once(scenario, seed):
                   if isinstance(v, bool)]
         report["passed"] = bool(checks) and all(checks)
 
+    except StepFail as e:
+        report["aborted"] = True
+        report["stopped_at"] = str(e)
+        report["passed"] = False
     except Abort:
         report["aborted"] = True
         report["passed"] = False
@@ -350,10 +418,11 @@ def run_once(scenario, seed):
         os.environ.pop("RC_REHEARSAL", None)
         env_flag.unlink(missing_ok=True)
         (ROOT / ".banner.pid").unlink(missing_ok=True)
-        try:
-            banner.wait(timeout=2)
-        except Exception:
-            banner.terminate()
+        if banner is not None:
+            try:
+                banner.wait(timeout=2)
+            except Exception:
+                banner.terminate()
 
     rows = json.loads(STORE.read_text()) if STORE.exists() else []
     rows.append(report)
@@ -419,6 +488,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("scenario", nargs="?")
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--demo", action="store_true",
+                    help="stage mode: no banner, frames/cards first-class "
+                         "(presenter discloses verbally), live thread "
+                         "state, stop-clean on any failed step")
     ap.add_argument("--runs", type=int, default=1)
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--regressions", action="store_true")
@@ -451,9 +524,13 @@ def main():
     scenario = json.loads(path.read_text())
     scenario["name"] = args.scenario
 
-    print(f"REHEARSAL: {args.scenario} · seed {args.seed} · "
+    print(f"{'DEMO' if args.demo else 'REHEARSAL'}: {args.scenario} · seed {args.seed} · "
           f"banner up · Esc aborts")
-    if args.runs > 1:
+    if args.demo:
+        print("DEMO MODE: no banner, first-class frames/cards, live "
+              "threads. Esc aborts instantly.")
+        print_report(run_once(scenario, args.seed, demo=True))
+    elif args.runs > 1:
         batch(scenario, args.runs, args.seed)
     else:
         print_report(run_once(scenario, args.seed))

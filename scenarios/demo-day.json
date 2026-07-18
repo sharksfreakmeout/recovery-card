@@ -1,0 +1,18 @@
+{
+  "about": "STAGE SCENARIO: real edit in this repo, a read pause in Claude, park, hands-off. ~40s driven. Run with --demo.",
+  "steps": [
+    {"do": "open_file", "app": "Cursor",
+     "path": "/Users/ericespinel/Gemma Hackathon/demo_scratch.py"},
+    {"do": "type", "text": "\n# Live demo: PLite is watching me write this line.\n", "typo_rate": 0.02},
+    {"do": "focus", "app": "Claude"},
+    {"do": "scroll", "times": 2},
+    {"do": "park", "text": "Heading into judging. Next: rehearse the close."},
+    {"do": "hands_off", "seconds": 45}
+  ],
+  "answer_key": {
+    "goal": "editing the demo scratch file in the PLite repo and reviewing notes with Claude",
+    "next_action": "rehearse the close",
+    "park_note": "Heading into judging. Next: rehearse the close.",
+    "active_thread": "plite"
+  }
+}

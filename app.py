@@ -248,43 +248,82 @@ def preflight():
             "fix": f"Open Terminal and run:  ollama pull {card_mod.PRIMARY_MODEL}",
         })
 
-    # Does a screenshot actually contain the screen, or a blank rectangle?
+    issues.extend(screen_access_issues(read_status()))
+    return issues
+
+
+def screen_access_issues(st, prober=None):
+    """The screen check, honest in BOTH directions.
+
+    (b) An engine that has KEPT a real frame in the last 5 minutes is
+        proof screen access works - greener than any probe, and immune
+        to probe-side quirks (this check once showed red minutes after
+        cards had generated).
+    (a) Otherwise probe with the SAME mechanism the capture loop uses.
+    (c) A probe ERROR is "could not check", a warn - never the red
+        permission message. Red is reserved for the one thing we can
+        prove: a successful capture that came back blank.
+    """
+    lk = st.get("last_kept_at")
+    if lk and time.time() - lk < 300:
+        return []  # capture is verifiably working right now
+
     probe = CAPTURES / "preflight_probe.png"
     CAPTURES.mkdir(exist_ok=True)
     try:
-        if not capture.grab_screen(probe):
-            issues.append({
+        grabbed = (prober or capture.grab_screen)(probe)
+        if not grabbed:
+            return [{
                 "level": "error",
                 "problem": "Screenshots are failing.",
                 "fix": ("System Settings > Privacy & Security > Screen "
-                        "Recording, switch on the app you started this from, "
-                        "then restart it."),
-            })
-        else:
-            fp = capture.fingerprint(probe)
-            spread = (max(fp) - min(fp)) if fp else 0
-            if spread < 10:
-                issues.append({
-                    "level": "error",
-                    "problem": ("Screenshots are coming out blank. macOS is "
-                                "handing over an empty screen."),
-                    "fix": ("System Settings > Privacy & Security > Screen "
-                            "Recording, switch on the app you started this "
-                            "from, then restart it."),
-                })
+                        "Recording, switch on the app you started this "
+                        "from, then restart it.")}]
+        fp = capture.fingerprint(probe)
+        spread = (max(fp) - min(fp)) if fp else 0
+        if spread < 10:
+            return [{
+                "level": "error",
+                "problem": ("Screenshots are coming out blank. macOS is "
+                            "handing over an empty screen."),
+                "fix": ("System Settings > Privacy & Security > Screen "
+                        "Recording, switch on the app you started this "
+                        "from, then restart it.")}]
+        return []
+    except Exception as e:
+        return [{
+            "level": "warn",
+            "problem": f"The screen check itself failed ({e}).",
+            "fix": ("This is not proof permission is missing. Start "
+                    "watching; if frames appear, all is well.")}]
     finally:
         probe.unlink(missing_ok=True)
-
-    return issues
 
 
 # --- Routes ---------------------------------------------------------------
 
+ONBOARD_FLAG = ROOT / ".onboarded"
+
+
+def is_onboarded():
+    """One absolute marker, identical from every launch path, surviving
+    every data wipe. Legacy graph flags migrate to it on sight - the
+    graph is deletable state; "has this person onboarded" is not."""
+    if ONBOARD_FLAG.exists():
+        return True
+    try:
+        if threads_mod.load()["meta"].get("onboarded"):
+            ONBOARD_FLAG.write_text(datetime.now().isoformat())
+            return True
+    except Exception:
+        pass
+    return False
+
+
 @app.route("/")
 def index():
     """The front door: onboarding on first run, the board after."""
-    g = threads_mod.load()
-    if not g["meta"].get("onboarded"):
+    if not is_onboarded():
         return render_template_string(ONBOARD_PAGE)
     return render_template_string(BOARD_PAGE)
 
@@ -889,6 +928,7 @@ def api_onboard_complete():
     g["meta"]["onboarded"] = True
     g["meta"]["onboarded_at"] = datetime.now().isoformat(timespec="seconds")
     threads_mod.save(g)
+    ONBOARD_FLAG.write_text(datetime.now().isoformat())
     return jsonify({"ok": True, "threads": len(g["threads"])})
 
 
@@ -1946,6 +1986,7 @@ ONBOARD_PAGE = r"""
     </div>
     <div class="actions">
       <button class="primary" onclick="go(2)">Get started</button>
+      <button class="quiet" onclick="finish()">Skip — take me to my board</button>
     </div>
   </div>
 

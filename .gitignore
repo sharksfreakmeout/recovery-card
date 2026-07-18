@@ -37,3 +37,4 @@ trust_settings.json
 .banner.pid
 private_apps.json
 .capture.pid
+.onboarded
