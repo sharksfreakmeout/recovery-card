@@ -1631,7 +1631,6 @@ BOARD_PAGE = r"""
   <div class="quietrow" id="quiet"></div>
 
   <div class="controls">
-    <button id="btn-cap" onclick="toggleCapture()">Start watching</button>
     <button class="primary" onclick="imBack()">I'm back</button>
   </div>
 
@@ -1646,11 +1645,6 @@ BOARD_PAGE = r"""
 
   <h2 class="sect" id="threads-title" style="display:none">YOUR THREADS</h2>
   <div id="threads"></div>
-
-  <h2 class="sect" id="card-title" style="display:none">THE CARD</h2>
-  <div id="card-slot"></div>
-
-  <div class="scoring" id="scoring" style="margin-top:18px"></div>
 
   <p style="margin-top:40px">
     <a class="engine" href="/trust">what it sees</a> ·
@@ -1714,35 +1708,21 @@ async function dismissEmergent() {
 async function tick() {
   let d; try { d = await (await fetch("/api/state")).json(); } catch(e){ return; }
   running = d.running;
-  document.getElementById("btn-cap").textContent =
-    running ? "Stop watching" : "Start watching";
+  // One quiet line. The board never shows machinery.
   const q = [];
-  if (d.mode === "ACTIVE") q.push(`<span><span class="beat"></span>watching · ${d.frames_kept} frames</span>`);
-  else if (d.mode === "AWAY") q.push(`<span>away ${Math.round(d.idle_seconds)}s</span>`);
+  if (d.mode === "ACTIVE") q.push(`<span><span class="beat"></span>watching</span>`);
   else if (d.mode === "SUSPENDED") q.push(`<span>asleep — state saved</span>`);
-  else if (d.mode === "RECONSTRUCTING") q.push(`<span>reading your screens… ${d.reconstructing_for ?? 0}s</span>`);
-  else if (d.mode === "CARD_READY") q.push(`<span>card ready</span>`);
-  else q.push(`<span>not watching</span>`);
-  if (d.away_summary && (d.mode === "CARD_READY" || d.mode === "RECONSTRUCTING"))
-    q.push(`<span>${esc(d.away_summary)}</span>`);
-  q.push(`<span>${esc(d.model)}</span>`);
-  q.push(`<span class="${d.network === "OFFLINE" ? "off" : ""}">${d.network.toLowerCase()}</span>`);
-  q.push(`<span>last card ${esc(d.last_card)}</span>`);
+  else if (d.mode === "RECONSTRUCTING") q.push(`<span>reading your screens…</span>`);
+  else if (d.mode === "CARD_READY") q.push(`<span>your card is ready</span>`);
+  else if (d.mode === "AWAY") q.push(`<span><span class="beat"></span>watching</span>`);
+  else q.push(`<span>not watching — start in the <a class="engine" href="/engine">engine room</a></span>`);
+  q.push(`<span class="${d.network === "OFFLINE" ? "off" : ""}">${d.network === "OFFLINE" ? "offline — fully on-device" : "on-device"}</span>`);
   document.getElementById("quiet").innerHTML = q.join(" · ");
-
-  document.getElementById("card-title").style.display = d.card ? "" : "none";
-  renderCard(d.card);
 }
 
-async function toggleCapture() {
-  await fetch("/api/capture/" + (running ? "stop" : "start"), {method:"POST"});
-  setTimeout(tick, 400);
-}
+// "I'm back" summons the return surface - the calm, card-only view.
 async function imBack() {
-  const d = await (await fetch("/api/state")).json();
-  if (d.card && d.mode === "CARD_READY") return;
-  await fetch("/api/generate", {method:"POST"});
-  tick();
+  await fetch("/api/summon", {method:"POST"});
 }
 async function park() {
   const i = document.getElementById("park");
@@ -1974,7 +1954,19 @@ setInterval(drawScoring, 6000);
 </html>
 """
 
-BOARD_PAGE = BOARD_PAGE + _CARD_ASSETS
+# The board is calm: headline, threads, park. The card renderer and the
+# scoring queue belong to the return surface and the engine room.
+BOARD_PAGE = BOARD_PAGE + r"""
+window.addEventListener("focus", () => { tick(); tickBoard(); });
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) { tick(); tickBoard(); }});
+tick(); tickBoard();
+setInterval(tick, 2500);
+setInterval(tickBoard, 3000);
+</script>
+</body>
+</html>
+"""
 
 
 TRUST_PAGE = r"""
@@ -2268,7 +2260,8 @@ OVERLAY_PAGE = r"""
     to   { opacity:1; transform:none; }
   }
   h2 { font-size:10.5px; letter-spacing:.18em; font-weight:600;
-       color:#8b93a1; margin:0 0 10px; }
+       color:#8b93a1; margin:0 0 10px;
+       display:flex; align-items:center; gap:8px; }
   .goal { font-size:29px; font-weight:500; line-height:1.28;
           letter-spacing:-.02em; margin:0 0 14px; }
   .reason { color:#9aa3b2; margin:0; font-size:16.5px; }
@@ -2289,6 +2282,25 @@ OVERLAY_PAGE = r"""
   .flag.failed  { background:rgba(247,118,142,.16); color:#f7768e; }
   .hint { margin-top:22px; text-align:center; font-size:12px;
           color:rgba(255,255,255,.45); }
+  .headline { font-size:15px; color:#9aa3b2; margin:0 0 6px; line-height:1.5; }
+  .awayline { font-size:13px; color:#e0af68; margin:0 0 14px; }
+  .parked { font-size:13.5px; color:#9aa3b2; padding:6px 0;
+            border-bottom:1px solid rgba(255,255,255,.06); }
+  .parked:last-child { border-bottom:none; }
+  .parked b { color:#c8cdd6; font-weight:500; }
+  .taps { margin-left:auto; display:inline-flex; gap:3px; opacity:.25;
+          transition:opacity .2s; }
+  .card:hover .taps { opacity:.7; } .taps:hover { opacity:1 !important; }
+  .taps button { padding:1px 7px; font-size:11px; border-radius:5px;
+                 background:transparent; border:1px solid rgba(255,255,255,.15);
+                 color:#8b93a1; cursor:pointer; }
+  .taps button.y.on { background:#7bcf9e; border-color:#7bcf9e; color:#0f1115; }
+  .taps button.n.on { background:#f7768e; border-color:#f7768e; color:#0f1115; }
+  .fixbox { display:flex; gap:6px; margin:8px 0 2px; }
+  .fixbox input { flex:1; font:inherit; font-size:13px; padding:7px 11px;
+                  border-radius:7px; border:1px solid #7aa2f7;
+                  background:rgba(0,0,0,.3); color:#f2f4f8; }
+  .fixed-note { margin:8px 0 2px; font-size:12.5px; color:#7bcf9e; }
   .waiting { text-align:center; color:#9aa3b2; }
   .spin { width:26px; height:26px; margin:0 auto 16px;
           border:2px solid rgba(255,255,255,.18); border-top-color:#7aa2f7;
@@ -2328,15 +2340,60 @@ document.addEventListener("click", e => {
 // shown actually changes; while reconstructing, tick the counter alone.
 let lastSig = null;
 
+// The moment of return shows ONLY what a depleted mind needs: the
+// situation in one sentence, the active thread's card, the other threads
+// with their return-points, and a way to say right/wrong. Nothing
+// operational lives here.
+let verdicts = {};
+
+function taps(file, field) {
+  const v = verdicts[file + ":" + field];
+  return `<span class="taps">
+    <button class="y ${v === true ? "on" : ""}"
+            onclick="tap('${file}','${field}',true)">✓</button>
+    <button class="n ${v === false ? "on" : ""}"
+            onclick="tap('${file}','${field}',false)">✗</button></span>`;
+}
+async function tap(file, field, value) {
+  verdicts[file + ":" + field] = value;
+  lastSig = null; draw();
+  await fetch("/api/verdict", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({file, field, value})});
+  if (value === false) setTimeout(() => showFix(file, field), 60);
+}
+function showFix(file, field) {
+  const host = document.getElementById("fix-" + field);
+  if (!host) return;
+  host.innerHTML = `<div class="fixbox">
+    <input id="fixin-${field}" placeholder="What were you actually doing?"
+           onkeydown="if(event.key==='Enter')saveFix('${file}','${field}')">
+    <button onclick="saveFix('${file}','${field}')">Save</button></div>`;
+  document.getElementById("fixin-" + field)?.focus();
+}
+async function saveFix(file, field) {
+  const i = document.getElementById("fixin-" + field);
+  const text = i ? i.value.trim() : "";
+  if (!text) return;
+  await fetch("/api/verdict", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({file, field, value:false, correction:text})});
+  const host = document.getElementById("fix-" + field);
+  if (host) host.innerHTML =
+    `<div class="fixed-note">Saved. Later cards will treat that as truth.</div>`;
+}
+
 async function draw() {
-  let d;
-  try { d = await (await fetch("/api/state")).json(); }
-  catch (e) { return; }
+  let d, b;
+  try {
+    d = await (await fetch("/api/state")).json();
+    b = await (await fetch("/api/board")).json();
+  } catch (e) { return; }
 
   const stage = document.getElementById("stage");
   const reconstructing = d.mode === "RECONSTRUCTING" || (!d.card && d.running);
-  const sig = JSON.stringify([reconstructing, d.card ? d.card._file : null]);
-
+  const sig = JSON.stringify([reconstructing, d.card ? d.card._file : null,
+                              verdicts, b.headline]);
   if (sig === lastSig) {
     if (reconstructing) {
       const el = document.getElementById("elapsed");
@@ -2365,20 +2422,33 @@ async function draw() {
   if (c.reduced_model) flag += '<div class="flag reduced">REDUCED MODEL</div> ';
   if (c.fail_closed)   flag += '<div class="flag failed">NOT ENOUGH SIGNAL</div>';
   const loops = (c.open_loops||[]).map(l=>"<li>"+esc(l)+"</li>").join("");
+  const f = c._file;
+  const away = d.away_summary ? `<p class="awayline">${esc(d.away_summary)}</p>` : "";
+  const parked = (c.parked || []).filter(p => p.name !== c.thread);
 
   stage.innerHTML = `
     <div class="card">
       <button class="x" onclick="close()" title="Dismiss">&times;</button>
+      <p class="headline">${esc(b.headline)}</p>
+      ${away}
       ${flag}
-      <h2>PICK UP HERE</h2>
-      <p class="goal">${esc(c.goal)}</p>
-      <p class="reason">${esc(c.reasoning)}</p>
-      <div class="sec"><h2>NEXT STEP</h2><p class="next">${esc(c.next_action)}</p></div>
-      ${loops?`<div class="sec"><h2>OPEN LOOPS</h2><ul>${loops}</ul></div>`:""}
+      ${c.agent_status ? `<div class="said">While you were away: ${esc(c.agent_status)}</div>` : ""}
+      <h2>PICK UP HERE ${taps(f, "goal")}</h2>
+      <p class="goal">${esc(c.goal)}</p><div id="fix-goal"></div>
+      <h2 style="margin-top:16px">WHY ${taps(f, "reasoning")}</h2>
+      <p class="reason">${esc(c.reasoning)}</p><div id="fix-reasoning"></div>
+      <div class="sec"><h2>NEXT STEP ${taps(f, "next_action")}</h2>
+        <p class="next">${esc(c.next_action)}</p><div id="fix-next_action"></div></div>
+      ${loops?`<div class="sec"><h2>OPEN LOOPS ${taps(f, "open_loops")}</h2>
+        <ul>${loops}</ul><div id="fix-open_loops"></div></div>`:""}
       ${c.park_note?`<div class="said">You said: “${esc(c.park_note)}”</div>`:""}
+      ${parked.length ? `<div class="sec"><h2>ALSO HOLDING</h2>` +
+        parked.slice(0,4).map(p => `<div class="parked">
+          <b>${esc(p.name)}</b>${p.return_point ? " — " + esc(p.return_point) : ""}
+        </div>`).join("") + `</div>` : ""}
       <div class="meta">
         confidence ${esc(c.confidence)} · ${esc(c.model||"")}
-        ${c.trigger?"· triggered by "+esc(c.trigger):""}<br>
+        ${c.trigger?"· "+esc(c.trigger):""}<br>
         evidence: ${esc(c.evidence)}
       </div>
     </div>

@@ -522,6 +522,16 @@ def main():
             prev_fp = None       # the screen has certainly changed
             landed_waiting = False
             write_status("CARD_READY", card_started_at=None)
+            # The return is certain, so the return surface appears on its
+            # own: the calm card-only view, nothing operational.
+            try:
+                port = os.environ.get("PORT", "5001")
+                subprocess.Popen(
+                    [sys.executable, str(ROOT / "overlay.py"),
+                     f"http://localhost:{port}"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
         # Measured AFTER any card generation: a 30-second generation must
         # not read as another sleep on the next cycle (it did, in testing -
         # one wake fired three cards).
