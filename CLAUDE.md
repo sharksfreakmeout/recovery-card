@@ -1,12 +1,16 @@
 # Recovery Card
 
-**PROJECT:** Recovery Card. A macOS tool for the Build with Gemma hackathon, On-Device track. It helps a person recover context after an interruption: it quietly screenshots their work, and when they return it uses a local Gemma 4 model to generate a "Recovery Card" saying what they were doing, the reasoning behind it, and the next action.
+**PROJECT:** Recovery Card. A macOS tool for the Build with Gemma hackathon, On-Device track. It passively captures screenshots of a person's work, and after an interruption uses a local Gemma 4 model to infer the cognitive state behind the work: what they were doing, why, and what comes next.
 
 ## HARD RULES
 
-1. **Everything runs 100% locally.** Model: `gemma4:12b-it-qat` via the Ollama API at `localhost:11434` (fallback: `gemma4:e2b-it-qat`). Never use any cloud API, hosted model, or cloud model tag. Never suggest Next.js, Vertex, AI Studio, or Hugging Face hosted inference. This is a disqualification risk.
-2. **I am non-technical.** After every step, explain what you did and how to test it in plain English, with exact commands.
-3. **Build one milestone at a time.** Stop after each and wait for my confirmation.
-4. **Commit after every working milestone** with a clear message. Clean commit history is a judging requirement.
-5. **Keep it simple:** Python 3, one small Flask page for the UI, no databases.
-6. **If I paste an error:** diagnose in plain English, fix it, then give me one command to verify.
+1. **100% local at runtime.** Model `gemma4:12b-it-qat` via Ollama at `localhost:11434`, fallback `gemma4:e2b-it-qat`. Never any cloud API, hosted model, or network call. Disqualification risk.
+2. **One milestone at a time**, wait for my confirmation.
+3. **Commit every working milestone** with a clear message and push.
+4. **Python 3 + Flask only.** No databases.
+5. **On errors:** diagnose in plain English, fix, give me one verify command.
+6. **Never delete files, install system-wide software, or run destructive git commands** without asking me.
+
+## Working style
+
+I am non-technical. After every step, explain what you did and how to test it in plain English, with exact commands.
