@@ -218,9 +218,21 @@ def classify(g, meta, hint_tid=None):
     text = frame_text(meta)
     low = text.lower()
 
+    # Tier 1 still - sticky assignments. The user said where this belongs;
+    # the classifier may never override that.
+    for label, tid in (g.get("sticky") or {}).items():
+        if label and label in low and tid in g["threads"] \
+                and g["threads"][tid].get("status") != "archived":
+            return tid, 1, 1.0
+
+    def live(t):
+        return t.get("status") != "archived"
+
     # Tier 2 - metadata anchors. A direct hit settles it.
     best_tid, best_hits = None, 0
     for tid, t in g["threads"].items():
+        if not live(t):
+            continue
         hits = sum(1 for a in t["anchors"] if a and a in low)
         if hits > best_hits:
             best_tid, best_hits = tid, hits
@@ -232,7 +244,8 @@ def classify(g, meta, hint_tid=None):
     if vec:
         scored = sorted(
             ((cosine(vec, t.get("centroid")), tid)
-             for tid, t in g["threads"].items() if t.get("centroid")),
+             for tid, t in g["threads"].items()
+             if t.get("centroid") and live(t)),
             reverse=True)
         if scored:
             top, tid = scored[0]
@@ -278,6 +291,15 @@ def update_affinity(g, tid, meta):
         aff[tid] = round(aff.get(tid, 0.0) + AFFINITY_GAIN, 3)
         feed_embedding(g, tid, embed(frame_text(meta))[0])
         touch(g, tid)
+        # Restore data: exact URLs and the frontmost app are the two things
+        # verifiably reopenable later. Collected here, spent by Resume.
+        t = g["threads"][tid]
+        url = (meta.get("ax") or {}).get("url")
+        if url:
+            urls = [u for u in t.get("recent_urls", []) if u != url]
+            t["recent_urls"] = (urls + [url])[-5:]
+        if meta.get("app") and meta["app"] != "hidden":
+            t["last_app"] = meta["app"]
 
     active = g["meta"].get("active_thread")
     if tid and tid != active and aff.get(tid, 0) >= SWITCH_MOMENTUM:
@@ -366,6 +388,125 @@ def retrieve(g, tid, query, k=4):
     ranked = sorted(zip(items, vecs),
                     key=lambda p: cosine(qv, p[1]), reverse=True)
     return [i for i, _ in ranked[:k]]
+
+
+# --- Nodes (documents, people, decisions, blockers, tasks) ----------------
+
+NODE_KINDS = ("document", "person", "decision", "blocker", "task")
+
+
+def upsert_node(g, tid, kind, label, source="", sticky=False):
+    """Attach a node to a thread, or refresh it if it already exists.
+
+    Nodes come from card-time entity extraction and from the user adding
+    them by hand. A user-added or user-moved node is STICKY: the classifier
+    may never override its thread assignment.
+    """
+    label = " ".join((label or "").split())[:80]
+    if not label or kind not in NODE_KINDS or tid not in g["threads"]:
+        return None
+    for n in g["nodes"]:
+        if n["thread"] == tid and n["label"].lower() == label.lower():
+            n["last_seen"] = _now()
+            n["salience"] = min(5.0, n.get("salience", 1.0) + 0.5)
+            if source and source not in n["sources"]:
+                n["sources"] = (n["sources"] + [source])[-8:]
+            if sticky:
+                n["sticky"] = True
+            return n
+    node = {
+        "id": f"n{len(g['nodes'])}_{re.sub(r'[^a-z0-9]+', '-', label.lower())[:24]}",
+        "thread": tid, "kind": kind, "label": label,
+        "pinned": False, "resolved": False, "sticky": bool(sticky),
+        "salience": 1.0,
+        "first_seen": _now(), "last_seen": _now(),
+        "sources": [source] if source else [],
+    }
+    g["nodes"].append(node)
+    if sticky:
+        set_sticky(g, label, tid)
+    return node
+
+
+def get_node(g, nid):
+    return next((n for n in g["nodes"] if n["id"] == nid), None)
+
+
+def set_sticky(g, label, tid):
+    """A user statement about where something belongs. Tier 1; permanent
+    unless the user says otherwise. The classifier can never override it."""
+    g.setdefault("sticky", {})[label.lower().strip()] = tid
+    add_anchor(g, tid, label)
+
+
+def visible_nodes(g, tid, limit=6):
+    """The few nodes worth showing: pinned first (human salience override),
+    then blockers, then by salience and recency."""
+    mine = [n for n in g["nodes"] if n["thread"] == tid]
+    mine.sort(key=lambda n: (
+        not n.get("pinned"),
+        not (n["kind"] == "blocker" and not n.get("resolved")),
+        -n.get("salience", 1.0),
+        n.get("last_seen", ""),
+    ))
+    return mine[:limit], mine[limit:]
+
+
+def merge_threads(g, keep_tid, absorb_tid):
+    """Two threads become one. Union of nodes, history, anchors,
+    embeddings; the kept thread's name survives."""
+    keep, absorb = g["threads"].get(keep_tid), g["threads"].get(absorb_tid)
+    if not keep or not absorb or keep_tid == absorb_tid:
+        return False
+    for n in g["nodes"]:
+        if n["thread"] == absorb_tid:
+            n["thread"] = keep_tid
+    keep["history"] = (absorb["history"] + keep["history"])[-40:]
+    for a in absorb["anchors"]:
+        add_anchor(g, keep_tid, a)
+    keep["recent_embeddings"] = (absorb.get("recent_embeddings", []) +
+                                 keep.get("recent_embeddings", []))[-CENTROID_WINDOW:]
+    keep["centroid"] = mean_vec(keep["recent_embeddings"])
+    if not keep.get("return_point"):
+        keep["return_point"] = absorb.get("return_point", "")
+    for lbl, t in list(g.get("sticky", {}).items()):
+        if t == absorb_tid:
+            g["sticky"][lbl] = keep_tid
+    if g["meta"].get("active_thread") == absorb_tid:
+        g["meta"]["active_thread"] = keep_tid
+    g["affinity"].pop(absorb_tid, None)
+    del g["threads"][absorb_tid]
+    return True
+
+
+def archive_thread(g, tid):
+    """Done. Leaves the board, stops attracting classification, history
+    preserved. Not deletion - the dashboard's forget is deletion."""
+    t = g["threads"].get(tid)
+    if not t:
+        return False
+    t["status"] = "archived"
+    if g["meta"].get("active_thread") == tid:
+        g["meta"]["active_thread"] = None
+    g["affinity"].pop(tid, None)
+    return True
+
+
+def resume_thread(g, tid):
+    """A deliberate human switch: instant, with an affinity head-start so
+    the next few frames don't have to re-earn what the person just said."""
+    t = g["threads"].get(tid)
+    if not t:
+        return False
+    active = g["meta"].get("active_thread")
+    if active and active in g["threads"] and active != tid:
+        g["threads"][active]["status"] = "parked"
+    t["status"] = "active"
+    t["last_seen"] = _now()
+    g["meta"]["active_thread"] = tid
+    g["affinity"][tid] = SWITCH_MOMENTUM + AFFINITY_GAIN
+    add_history(g, tid, "resume", f"resumed deliberately at {_now()}")
+    return True
 
 
 # --- Board data -----------------------------------------------------------

@@ -50,6 +50,21 @@ CARD_SCHEMA = {
         # Optional: filled only when the user's AI agent visibly kept
         # working while they were away.
         "agent_status": {"type": "string"},
+        # Optional: concrete things visible on screen that belong to the
+        # active thread. These become the thread map's nodes.
+        "entities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string",
+                             "enum": ["document", "person", "decision",
+                                      "blocker", "task"]},
+                    "label": {"type": "string"},
+                },
+                "required": ["kind", "label"],
+            },
+        },
     },
     "required": ["goal", "reasoning", "next_action", "open_loops",
                  "confidence", "evidence"],
@@ -340,6 +355,11 @@ def build_prompt(frames, park, corrections=None, active=None, parked=None,
         "ONLY, ordered by consequence: the one that costs most if forgotten "
         "comes first. Other threads of work are NEVER open loops - they are "
         "listed separately as parked threads and must not appear here.",
+        "  entities    - up to 4 concrete things VISIBLE ON SCREEN that "
+        "belong to the active thread: a document (by its actual name), a "
+        "person (by name), a decision being made, a blocker, or a task. "
+        "Plain short labels ('PR #206', 'Marcus', 'pricing model sheet'). "
+        "Only what you can actually see; an empty list is fine.",
         "  confidence  - high, medium, or low",
         "  evidence    - one sentence naming the specific things ON SCREEN "
         "that support this. Name the actual document, window, or content "
@@ -524,6 +544,10 @@ def generate():
             T.add_history(graph, active["id"], "card",
                           f"{card['goal']} → {card['next_action']}")
             T.touch(graph, active["id"], return_point=card["next_action"])
+            # Entities the model saw become (or refresh) map nodes.
+            for e in (card.get("entities") or [])[:4]:
+                T.upsert_node(graph, active["id"], e.get("kind", ""),
+                              e.get("label", ""), source="card")
             T.save(graph)
         except Exception:
             pass
