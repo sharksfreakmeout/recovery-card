@@ -87,17 +87,24 @@ class Driver:
         p = str(Path(step["path"]).expanduser())
         app = step.get("app", "Cursor")
         subprocess.run(["open", "-a", app, p], capture_output=True)
-        nap(2.2)
-        want = Path(p).name.lower()
-        ok_, title, _ = osa(
-            'tell application "System Events" to tell (first application '
-            'process whose frontmost is true) to get name of front window')
-        if want.split(".")[0] not in (title or "").lower():
-            self.report["failures"].append(
-                f"open_file: {want} did not become the focused window "
-                f"(front: {title!r})")
-            return False
-        return True
+        want = Path(p).name.lower().split(".")[0]
+        # Cursor's FRONT window often reports an empty AX name (a
+        # night-one macOS quirk that broke this verify on stage prep).
+        # Verify instead: the app is frontmost AND ANY of its windows
+        # lists the file - that is what "it opened" actually looks like.
+        for attempt in range(3):
+            nap(1.5)
+            if frontmost() != app:
+                continue
+            ok_, titles, _ = osa(
+                f'tell application "System Events" to tell process '
+                f'"{app}" to get name of every window')
+            if want in (titles or "").lower():
+                return True
+        self.report["failures"].append(
+            f"open_file: {want} not in {app}'s windows after open "
+            f"(front app: {frontmost()!r}, windows: {titles!r})")
+        return False
 
     def verify_focus(self, app, retried=False):
         nap(0.6)
