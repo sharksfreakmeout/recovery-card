@@ -472,6 +472,7 @@ def api_state():
         "last_capture": human_time(st.get("last_capture")),
         "last_card": human_time(c.get("generated_at")) if c else "never",
         "reconstructing_for": elapsed,
+        "away_summary": st.get("away_summary", ""),
         "model": model or "none",
         "reduced_model": reduced,
         "network": "ONLINE" if network_up() else "OFFLINE",
@@ -1718,9 +1719,12 @@ async function tick() {
   const q = [];
   if (d.mode === "ACTIVE") q.push(`<span><span class="beat"></span>watching · ${d.frames_kept} frames</span>`);
   else if (d.mode === "AWAY") q.push(`<span>away ${Math.round(d.idle_seconds)}s</span>`);
+  else if (d.mode === "SUSPENDED") q.push(`<span>asleep — state saved</span>`);
   else if (d.mode === "RECONSTRUCTING") q.push(`<span>reading your screens… ${d.reconstructing_for ?? 0}s</span>`);
   else if (d.mode === "CARD_READY") q.push(`<span>card ready</span>`);
   else q.push(`<span>not watching</span>`);
+  if (d.away_summary && (d.mode === "CARD_READY" || d.mode === "RECONSTRUCTING"))
+    q.push(`<span>${esc(d.away_summary)}</span>`);
   q.push(`<span>${esc(d.model)}</span>`);
   q.push(`<span class="${d.network === "OFFLINE" ? "off" : ""}">${d.network.toLowerCase()}</span>`);
   q.push(`<span>last card ${esc(d.last_card)}</span>`);

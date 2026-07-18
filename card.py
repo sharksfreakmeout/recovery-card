@@ -251,6 +251,22 @@ def build_prompt(frames, park, corrections=None, active=None, parked=None,
             "",
         ]
 
+    # Sleep awareness. Sleep time is honestly unobserved: the card may say
+    # how long the person was away, but never what happened meanwhile.
+    away_mode = os.environ.get("RECOVERY_AWAY_MODE", "")
+    away_secs = int(os.environ.get("RECOVERY_AWAY_SECONDS", "0") or 0)
+    if away_mode == "asleep":
+        mins = max(1, round(away_secs / 60))
+        lines += [
+            f"THE PERSON WAS AWAY ~{mins} MINUTE(S), AND THE MAC WAS ASLEEP "
+            "THE WHOLE TIME.",
+            "The screenshots you see are all from BEFORE sleep. Nothing that "
+            "happened during sleep was observed - never claim or imply "
+            "knowledge of that time. Reconstruct where they left off, not "
+            "what happened while the machine was off.",
+            "",
+        ]
+
     # Chat awareness: composed text is authorship; stitched text is scene
     # context; the AI's restatement is never the person's words.
     try:
@@ -277,7 +293,11 @@ def build_prompt(frames, park, corrections=None, active=None, parked=None,
                     lines.append(f'  [{s["at"]}] {s["text"][:400]}')
                 lines.append("")
 
-            if any(m.get("agent_working") for m in metas):
+            # Agent-working applies ONLY to awake gaps: during sleep the
+            # agent was suspended too, and pre-sleep agent signals must not
+            # be narrated as "while you were away".
+            if (away_mode != "asleep"
+                    and any(m.get("agent_working") for m in metas)):
                 lines += [
                     "SIGNAL: while the person was away, their AI agent kept "
                     "working (input idle, screen still changing on a chat "
@@ -489,6 +509,12 @@ def generate():
             T.save(graph)
         except Exception:
             pass
+
+    # The card records how the person was away, in plain words.
+    away_mode = os.environ.get("RECOVERY_AWAY_MODE", "")
+    away_secs = int(os.environ.get("RECOVERY_AWAY_SECONDS", "0") or 0)
+    if away_mode:
+        card["away"] = {"mode": away_mode, "seconds": away_secs}
 
     card["generated_at"] = datetime.now().isoformat(timespec="seconds")
     card["frames_used"] = [f.name for f, _ in frames]

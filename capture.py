@@ -23,6 +23,7 @@ import struct
 import subprocess
 import sys
 import time
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -346,6 +347,63 @@ def window_context():
     }
 
 
+# --- Sleep / wake awareness -------------------------------------------------
+# Two detectors, by design:
+#
+#   1. NSWorkspace notifications (best-effort): stamp the moment sleep
+#      begins. We may lose the race to suspension - that must cost nothing.
+#   2. Wall-clock jump (reliable): during sleep this process is suspended,
+#      so when a loop cycle takes far longer than the interval, the machine
+#      slept. This works even when the notification never arrived.
+#
+# The away duration is computed from the wall clock, so sleep time counts
+# as away time. What happened during sleep is honestly unobserved.
+
+import threading
+
+_slept_at = {"t": None}          # stamped by the notification, best-effort
+_woke_event = threading.Event()  # set by DidWake, best-effort
+
+SLEEP_JUMP = float(os.environ.get("SLEEP_JUMP", 30))  # extra secs = slept
+
+
+def _sleep_watcher():
+    """Background listener for macOS sleep/wake. Entirely best-effort."""
+    try:
+        from AppKit import NSWorkspace
+        from Foundation import NSObject, NSRunLoop
+
+        class _Obs(NSObject):
+            def willSleep_(self, _note):
+                _slept_at["t"] = time.time()
+                try:
+                    write_status("SUSPENDED", slept_at=_slept_at["t"])
+                except Exception:
+                    pass
+                log("Mac is going to sleep - state flushed.")
+
+            def didWake_(self, _note):
+                _woke_event.set()
+
+        obs = _Obs.alloc().init()
+        nc = NSWorkspace.sharedWorkspace().notificationCenter()
+        nc.addObserver_selector_name_object_(
+            obs, b"willSleep:", "NSWorkspaceWillSleepNotification", None)
+        nc.addObserver_selector_name_object_(
+            obs, b"didWake:", "NSWorkspaceDidWakeNotification", None)
+        NSRunLoop.currentRunLoop().run()
+    except Exception:
+        pass  # clock-jump detection carries the load alone
+
+
+def away_summary_text(seconds, asleep):
+    mins = int(round(seconds / 60))
+    span = (f"{mins} minute" + ("s" if mins != 1 else "")) if mins >= 1 \
+        else f"{int(seconds)} seconds"
+    return (f"You were away {span} (your Mac was asleep)." if asleep
+            else f"You were away {span}.")
+
+
 # --- Idle watching --------------------------------------------------------
 
 def idle_seconds() -> float:
@@ -359,7 +417,7 @@ def idle_seconds() -> float:
         return 0.0
 
 
-def generate_card(reason: str):
+def generate_card(reason: str, trigger="idle", away=None):
     """Hand off to Stage 2. Safe to call before card.py exists."""
     card = ROOT / "card.py"
     if not card.exists():
@@ -369,7 +427,10 @@ def generate_card(reason: str):
     log(f"  -> generating card ({reason})...")
     try:
         env = dict(os.environ)
-        env["RECOVERY_TRIGGER"] = "idle"  # stamped into the card as provenance
+        env["RECOVERY_TRIGGER"] = trigger  # stamped into the card as provenance
+        if away:
+            env["RECOVERY_AWAY_MODE"] = away.get("mode", "")
+            env["RECOVERY_AWAY_SECONDS"] = str(int(away.get("seconds", 0)))
         r = subprocess.run([sys.executable, str(card)],
                            capture_output=True, text=True, timeout=300,
                            env=env)
@@ -417,24 +478,67 @@ def main():
     except Exception:
         T, graph = None, None
 
+    threading.Thread(target=_sleep_watcher, daemon=True).start()
+
     prev_fp = None
     prev_app = None
     landed_waiting = False   # switched app but not yet engaged there
     kept = skipped = 0
     card_fired = False  # so one absence triggers exactly one card
+    last_cycle = time.time()
 
     while True:
         cycle_start = time.time()
+
+        # --- Wake detection. The return is certain: no idle threshold. ---
+        gap = cycle_start - last_cycle
+        woke = _woke_event.is_set() or gap > CAPTURE_INTERVAL + SLEEP_JUMP
+        if woke:
+            _woke_event.clear()
+            # Sleep time counts as away time, from the wall clock. Prefer
+            # the notification's stamp when we won that race; the loop gap
+            # is the honest fallback when we lost it.
+            slept_at = _slept_at["t"]
+            away_secs = (cycle_start - slept_at) if slept_at else gap
+            _slept_at["t"] = None
+            summary = away_summary_text(away_secs, asleep=True)
+            log(f"Woke from sleep. {summary}")
+            write_status("RECONSTRUCTING", card_started_at=time.time(),
+                         away_summary=summary)
+
+            # Generate as soon as the model is reachable (Ollama also just
+            # woke up; give it a moment rather than failing the one card
+            # that matters most).
+            for _ in range(30):
+                try:
+                    urllib.request.urlopen(
+                        "http://localhost:11434/api/tags", timeout=2)
+                    break
+                except Exception:
+                    time.sleep(1)
+            generate_card(f"wake after {summary}", trigger="wake",
+                          away={"mode": "asleep", "seconds": away_secs})
+            card_fired = True
+            prev_fp = None       # the screen has certainly changed
+            landed_waiting = False
+            write_status("CARD_READY", card_started_at=None)
+        # Measured AFTER any card generation: a 30-second generation must
+        # not read as another sleep on the next cycle (it did, in testing -
+        # one wake fired three cards).
+        last_cycle = time.time()
 
         idle = idle_seconds()
         STATE["idle_seconds"] = round(idle, 1)
 
         if idle >= IDLE_THRESHOLD and not card_fired:
             log(f"Idle for {idle:.0f}s - you stepped away.")
-            write_status("RECONSTRUCTING", card_started_at=time.time())
-            generate_card(f"idle {idle:.0f}s")
+            write_status("RECONSTRUCTING", card_started_at=time.time(),
+                         away_summary=away_summary_text(idle, asleep=False))
+            generate_card(f"idle {idle:.0f}s", trigger="idle",
+                          away={"mode": "awake", "seconds": idle})
             card_fired = True
             write_status("CARD_READY", card_started_at=None)
+            last_cycle = time.time()  # generation time is not a sleep gap
         elif idle < AWAY_AFTER and card_fired:
             log("Welcome back. Re-arming the idle trigger.")
             card_fired = False
