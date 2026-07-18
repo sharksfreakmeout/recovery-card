@@ -4,8 +4,12 @@
 Park notes are the user's own words about what they were doing, written
 before they stepped away. That makes them ground truth, recorded before
 the model ever saw the screenshots. Any card generated while a park note
-was active can therefore be scored honestly: did the card match what the
-person actually said they were doing?
+was active can therefore be scored honestly.
+
+Scoring is per field, not per card. A card can nail the goal and miss the
+next action entirely, and a single correct/incorrect verdict throws that
+information away. Four marks per card: goal, reasoning, next_action,
+open_loops.
 
 Run:  python3 eval.py           score cards not yet judged
       python3 eval.py --all     re-judge everything from scratch
@@ -21,6 +25,8 @@ ROOT = Path(__file__).resolve().parent
 CARDS = ROOT / "cards"
 EVAL = ROOT / "eval"
 RESULTS = EVAL / "results.json"
+
+FIELDS = ["goal", "reasoning", "next_action", "open_loops"]
 
 BOLD = "\033[1m"
 DIM = "\033[2m"
@@ -64,39 +70,66 @@ def scored_cards():
 
 
 def tally(results):
-    judged = [r for r in results.values() if r.get("verdict") in
-              ("correct", "incorrect")]
-    correct = sum(1 for r in judged if r["verdict"] == "correct")
-    return correct, len(judged)
+    """Per-field hits and totals, plus the overall roll-up.
+
+    Fields marked not-applicable are excluded from their denominator
+    rather than counted as either right or wrong.
+    """
+    per = {f: [0, 0] for f in FIELDS}  # [correct, judged]
+    for r in results.values():
+        for f, mark in (r.get("marks") or {}).items():
+            if f not in per or mark not in (True, False):
+                continue
+            per[f][1] += 1
+            if mark:
+                per[f][0] += 1
+    total_correct = sum(v[0] for v in per.values())
+    total_judged = sum(v[1] for v in per.values())
+    return per, total_correct, total_judged
 
 
 def print_tally(results, prefix="Running tally"):
-    correct, total = tally(results)
-    if total == 0:
+    per, correct, judged = tally(results)
+    if judged == 0:
         print(f"{DIM}{prefix}: nothing judged yet{OFF}")
         return
-    pct = 100 * correct / total
+
+    parts = []
+    for f in FIELDS:
+        ok, n = per[f]
+        if n == 0:
+            continue
+        pct = 100 * ok / n
+        colour = GREEN if pct >= 70 else (YELLOW if pct >= 50 else RED)
+        parts.append(f"{f} {colour}{ok}/{n}{OFF}{BOLD}")
+
+    pct = 100 * correct / judged
     colour = GREEN if pct >= 70 else (YELLOW if pct >= 50 else RED)
-    print(f"{BOLD}{prefix}: {colour}{correct}/{total}{OFF}{BOLD} "
-          f"({pct:.0f}%){OFF}")
+    print(f"{BOLD}{prefix}: " + ", ".join(parts) +
+          f", overall {colour}{correct}/{judged}{OFF}{BOLD} ({pct:.0f}%){OFF}")
 
 
 def show_pair(path, card, n, of):
     print()
-    print("=" * 70)
+    print("=" * 72)
     print(f"{DIM}Card {n} of {of}   {path.name}   "
-          f"{card.get('generated_at', '')}{OFF}")
-    print("=" * 70)
+          f"{card.get('generated_at', '')}"
+          f"   trigger: {card.get('trigger', '?')}{OFF}")
+    print("=" * 72)
     print()
     print(f"{BOLD}GROUND TRUTH — what you said before stepping away:{OFF}")
     print(f'  {GREEN}"{card["park_note"]}"{OFF}')
     print()
     print(f"{BOLD}WHAT THE CARD SAID:{OFF}")
-    print(f"  goal        {card.get('goal', '')}")
-    print(f"  next step   {card.get('next_action', '')}")
+    print(f"  {BOLD}goal{OFF}         {card.get('goal', '')}")
+    print(f"  {BOLD}reasoning{OFF}    {card.get('reasoning', '')}")
+    print(f"  {BOLD}next_action{OFF}  {card.get('next_action', '')}")
     loops = card.get("open_loops") or []
     if loops:
-        print(f"  open loops  {'; '.join(str(x) for x in loops)}")
+        print(f"  {BOLD}open_loops{OFF}   " +
+              f"\n{' ' * 15}".join(str(x) for x in loops))
+    else:
+        print(f"  {BOLD}open_loops{OFF}   {DIM}(none){OFF}")
     print()
     print(f"{DIM}  confidence: {card.get('confidence', '?')}"
           f"   model: {card.get('model', '?')}"
@@ -107,69 +140,97 @@ def show_pair(path, card, n, of):
     print()
 
 
+def ask_fields(card):
+    """Four marks per card. Returns dict, or None to skip, 'quit' to stop."""
+    marks = {}
+    for f in FIELDS:
+        while True:
+            try:
+                a = input(f"  {f} correct? [y/n/-/s/q] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return "quit"
+
+            if a in ("y", "n"):
+                marks[f] = (a == "y")
+                break
+            if a == "-":
+                marks[f] = None  # not applicable, excluded from the denominator
+                break
+            if a == "s":
+                return None
+            if a == "q":
+                return "quit"
+            print(f"{DIM}    y = correct, n = wrong, - = not applicable, "
+                  f"s = skip card, q = quit{OFF}")
+    return marks
+
+
 def judge(results, cards):
     print()
-    print(f"For each card: does it match what you actually said you were "
-          f"doing?")
-    print(f"{DIM}  c = correct    i = incorrect    s = skip    q = quit "
-          f"and save{OFF}")
+    print("For each card, mark each field against what you actually said.")
+    print(f"{DIM}  y = correct   n = wrong   - = not applicable   "
+          f"s = skip card   q = quit and save{OFF}")
 
     for n, (path, card) in enumerate(cards, 1):
         show_pair(path, card, n, len(cards))
+        marks = ask_fields(card)
 
-        while True:
-            try:
-                answer = input("  correct? [c/i/s/q] ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                save_results(results)
-                print_tally(results, "Final tally")
-                return
+        if marks == "quit":
+            save_results(results)
+            print()
+            print_tally(results, "Final tally")
+            return
+        if marks is None:
+            continue
 
-            if answer in ("c", "i"):
-                results[path.name] = {
-                    "verdict": "correct" if answer == "c" else "incorrect",
-                    "judged_at": datetime.now().isoformat(timespec="seconds"),
-                    "park_note": card["park_note"],
-                    "goal": card.get("goal", ""),
-                    "confidence": card.get("confidence", ""),
-                    "model": card.get("model", ""),
-                    "fail_closed": bool(card.get("fail_closed")),
-                }
-                save_results(results)
-                print_tally(results)
-                break
-            if answer == "s":
-                break
-            if answer == "q":
-                save_results(results)
-                print()
-                print_tally(results, "Final tally")
-                return
-            print(f"{DIM}  please type c, i, s or q{OFF}")
+        results[path.name] = {
+            "marks": marks,
+            "judged_at": datetime.now().isoformat(timespec="seconds"),
+            "park_note": card["park_note"],
+            "goal": card.get("goal", ""),
+            "confidence": card.get("confidence", ""),
+            "model": card.get("model", ""),
+            "trigger": card.get("trigger", ""),
+            "fail_closed": bool(card.get("fail_closed")),
+        }
+        save_results(results)
+        print()
+        print_tally(results)
 
     print()
     print_tally(results, "Final tally")
 
 
 def breakdown(results):
-    """A little extra honesty: how the model does when it claims confidence."""
-    judged = [r for r in results.values()
-              if r.get("verdict") in ("correct", "incorrect")]
-    if not judged:
+    """Where the model is overconfident, and how it does per field."""
+    per, correct, judged = tally(results)
+    if judged == 0:
         return
+
     print()
-    print(f"{BOLD}Breakdown{OFF}")
+    print(f"{BOLD}By field{OFF}")
+    for f in FIELDS:
+        ok, n = per[f]
+        if n:
+            print(f"  {f:<12} {ok}/{n}")
+
+    print()
+    print(f"{BOLD}By claimed confidence{OFF}")
     for level in ("high", "medium", "low"):
-        rows = [r for r in judged if r.get("confidence") == level]
-        if not rows:
-            continue
-        ok = sum(1 for r in rows if r["verdict"] == "correct")
-        print(f"  confidence {level:<7} {ok}/{len(rows)}")
-    failed = [r for r in judged if r.get("fail_closed")]
+        rows = [r for r in results.values() if r.get("confidence") == level]
+        ok = sum(1 for r in rows for m in (r.get("marks") or {}).values()
+                 if m is True)
+        n = sum(1 for r in rows for m in (r.get("marks") or {}).values()
+                if m in (True, False))
+        if n:
+            print(f"  {level:<12} {ok}/{n}")
+
+    failed = [r for r in results.values() if r.get("fail_closed")]
     if failed:
-        print(f"  {DIM}(of these, {len(failed)} were fail-closed cards, which "
-              f"admit they have nothing rather than guessing){OFF}")
+        print()
+        print(f"  {DIM}{len(failed)} fail-closed card(s) included, which admit "
+              f"they have nothing rather than guessing{OFF}")
 
 
 def main():
@@ -191,7 +252,7 @@ def main():
               "against.")
         print()
         print("To create one:")
-        print("  1. Open the app and type a line in the Park it box, e.g.")
+        print("  1. Type a line in the Park it box, e.g.")
         print('     "about to write the eval harness"')
         print("  2. Step away until the card generates.")
         print("  3. Run this again.")
