@@ -30,3 +30,5 @@ logs/
 # The thread graph holds real work content (thread names, return points).
 graph.json
 trust_settings.json
+.overlay.pid
+.menubar.pid

@@ -1977,11 +1977,13 @@ async function tick() {
   running = d.running;
   // One quiet line. The board never shows machinery.
   const q = [];
-  if (d.mode === "ACTIVE") q.push(`<span><span class="beat"></span>watching</span>`);
+  // Silent generation law: RECONSTRUCTING is a background state, visible
+  // only in the menu bar (subtle) and the engine room. Here it is just
+  // "watching" - a false idle-fire must cost nothing visible.
+  if (["ACTIVE", "AWAY", "RECONSTRUCTING"].includes(d.mode))
+    q.push(`<span><span class="beat"></span>watching</span>`);
   else if (d.mode === "SUSPENDED") q.push(`<span>asleep — state saved</span>`);
-  else if (d.mode === "RECONSTRUCTING") q.push(`<span>reading your screens…</span>`);
   else if (d.mode === "CARD_READY") q.push(`<span>your card is ready</span>`);
-  else if (d.mode === "AWAY") q.push(`<span><span class="beat"></span>watching</span>`);
   else q.push(`<span>not watching — start in the <a class="engine" href="/engine">engine room</a></span>`);
   q.push(`<span class="${d.network === "OFFLINE" ? "off" : ""}">${d.network === "OFFLINE" ? "offline — fully on-device" : "on-device"}</span>`);
   document.getElementById("quiet").innerHTML = q.join(" · ");
@@ -2223,7 +2225,11 @@ setInterval(drawScoring, 6000);
 
 # The board is calm: headline, threads, park. The card renderer and the
 # scoring queue belong to the return surface and the engine room.
+# NOTE the opening <script> below: the board's main block is already closed
+# by this point. Appending bare JS here once rendered as literal text on
+# the page - and none of it ran.
 BOARD_PAGE = BOARD_PAGE + r"""
+<script>
 window.addEventListener("focus", () => { tick(); tickBoard(); });
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) { tick(); tickBoard(); }});
@@ -2748,6 +2754,21 @@ if __name__ == "__main__":
         print("  All checks passed: Ollama up, model present, screen readable.")
 
     wanted = int(os.environ.get("PORT", DEFAULT_PORT))
+
+    # Single instance: if OUR engine already answers on the wanted port,
+    # this launch defers to it instead of stepping to a second port and
+    # silently running a parallel universe.
+    try:
+        import urllib.request as _u
+        with _u.urlopen(f"http://127.0.0.1:{wanted}/api/state",
+                        timeout=2) as r:
+            if r.status == 200:
+                print(f"\n  Recovery Card is already running on port "
+                      f"{wanted}. Using that instance.\n")
+                sys.exit(0)
+    except Exception:
+        pass
+
     port, moved = choose_port()
     if moved:
         print("\n" + "!" * 66)

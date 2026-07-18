@@ -434,6 +434,14 @@ def away_summary_text(seconds, asleep):
 
 def idle_seconds() -> float:
     """Seconds since the last keyboard or mouse input."""
+    # Test hook: the state machine must be drivable deterministically.
+    # RC_TEST_IDLE_FILE points at a file whose content is the idle value.
+    fake = os.environ.get("RC_TEST_IDLE_FILE")
+    if fake:
+        try:
+            return float(Path(fake).read_text().strip() or 0)
+        except Exception:
+            return 0.0
     try:
         r = subprocess.run(["ioreg", "-c", "IOHIDSystem"],
                            capture_output=True, text=True, timeout=5)
@@ -445,6 +453,21 @@ def idle_seconds() -> float:
 
 def generate_card(reason: str, trigger="idle", away=None):
     """Hand off to Stage 2. Safe to call before card.py exists."""
+    # Test hook: state-machine tests count cards without paying for
+    # inference. The stub card is clearly marked as such.
+    if os.environ.get("RC_TEST_STUB_CARD"):
+        CARDS_DIR = ROOT / "cards"
+        CARDS_DIR.mkdir(exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        (CARDS_DIR / f"card_{stamp[:15]}.json").write_text(json.dumps({
+            "goal": "STUB (state test)", "reasoning": "stub",
+            "next_action": "stub", "open_loops": [], "confidence": "low",
+            "evidence": "stub card written by the RC_TEST_STUB_CARD hook",
+            "fail_closed": False, "trigger": trigger,
+            "away": away, "stub": True,
+            "generated_at": datetime.now().isoformat(timespec="seconds")}))
+        log(f"  -> stub card written ({reason})")
+        return
     card = ROOT / "card.py"
     if not card.exists():
         log(f"  -> would generate a card now ({reason}), "
@@ -615,6 +638,26 @@ def main():
                 events.log_event("engaged")  # first input after a return
             except Exception:
                 pass
+            # True return after a real absence: one of the five moments a
+            # surface may appear (silent generation law). Pidfile-deduped;
+            # never a second overlay.
+            try:
+                pidfile = ROOT / ".overlay.pid"
+                stale = True
+                if pidfile.exists():
+                    try:
+                        os.kill(int(pidfile.read_text().strip()), 0)
+                        stale = False
+                    except Exception:
+                        pass
+                if stale:
+                    port = os.environ.get("PORT", "5001")
+                    subprocess.Popen(
+                        [sys.executable, str(ROOT / "overlay.py"),
+                         f"http://localhost:{port}"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
         elif card_fired:
             write_status("CARD_READY")
         else:
@@ -754,12 +797,16 @@ def main():
 
             prev_fp = fp
             kept += 1
-            write_status(frames_kept=kept, last_frame=final.name,
+            prune()
+            # frames_kept is what is ON DISK after pruning, not a session
+            # counter: a cumulative count read as "100 frames" against a
+            # spec of 20.
+            on_disk = len(list(CAPTURES.glob("frame_*.png")))
+            write_status(frames_kept=on_disk, last_frame=final.name,
                          last_capture=ctx["timestamp"])
             title = ctx["window_title"] or "(untitled window)"
             log(f"KEEP  {final.name}  diff={dist:.2f}  "
                 f"{ctx['app']} ({snap.get('doing', '?')}) - {title[:44]}")
-            prune()
 
         elapsed = time.time() - cycle_start
         time.sleep(max(0.0, CAPTURE_INTERVAL - elapsed))

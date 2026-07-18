@@ -254,4 +254,17 @@ class RecoveryCard(rumps.App):
 
 
 if __name__ == "__main__":
+    # Single instance: a second menu bar app means two bones and two
+    # pollers. Defer to the one already running.
+    pidfile = ROOT / ".menubar.pid"
+    try:
+        old = int(pidfile.read_text().strip())
+        os.kill(old, 0)
+        print(f"Recovery Card menu bar is already running (pid {old}).")
+        sys.exit(0)
+    except Exception:
+        pass
+    pidfile.write_text(str(os.getpid()))
+    import atexit
+    atexit.register(lambda: pidfile.unlink(missing_ok=True))
     RecoveryCard().run()
