@@ -69,6 +69,42 @@ def scored_cards():
     return out
 
 
+def pending(results):
+    """Scoreable cards that have not been judged yet."""
+    return [(p, c) for p, c in scored_cards() if p.name not in results]
+
+
+def tally_dict(results):
+    """The tally as plain data, for the app's scoring panel.
+
+    app.py imports this so the UI and the command line can never disagree
+    about the score.
+    """
+    per, correct, judged = tally(results)
+    return {
+        "fields": {f: {"correct": per[f][0], "judged": per[f][1]}
+                   for f in FIELDS},
+        "overall": {"correct": correct, "judged": judged},
+        "percent": round(100 * correct / judged, 1) if judged else None,
+    }
+
+
+def record(results, card_file, card, marks):
+    """Store one card's four marks. Shared by the CLI and the app."""
+    results[card_file] = {
+        "marks": marks,
+        "judged_at": datetime.now().isoformat(timespec="seconds"),
+        "park_note": card.get("park_note", ""),
+        "goal": card.get("goal", ""),
+        "confidence": card.get("confidence", ""),
+        "model": card.get("model", ""),
+        "trigger": card.get("trigger", ""),
+        "fail_closed": bool(card.get("fail_closed")),
+    }
+    save_results(results)
+    return results
+
+
 def tally(results):
     """Per-field hits and totals, plus the overall roll-up.
 

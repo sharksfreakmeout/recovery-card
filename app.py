@@ -24,6 +24,7 @@ from flask import Flask, jsonify, render_template_string, request
 
 import capture
 import card as card_mod
+import eval as eval_mod
 
 ROOT = Path(__file__).resolve().parent
 CAPTURES = ROOT / "captures"
@@ -398,6 +399,67 @@ def api_preflight():
     return jsonify({"issues": preflight()})
 
 
+@app.route("/api/eval")
+def api_eval():
+    """Scoring state: the tally so far, and the next card awaiting judgement.
+
+    Only cards generated while a park note was active appear here. The park
+    note is the user's own words, written before the model saw anything, so
+    it is the only honest ground truth available.
+    """
+    results = eval_mod.load_results()
+    todo = eval_mod.pending(results)
+
+    nxt = None
+    if todo:
+        path, c = todo[0]
+        nxt = {
+            "file": path.name,
+            "park_note": c.get("park_note", ""),
+            "generated_at": c.get("generated_at", ""),
+            "trigger": c.get("trigger", ""),
+            "confidence": c.get("confidence", ""),
+            "model": c.get("model", ""),
+            "fail_closed": bool(c.get("fail_closed")),
+            "goal": c.get("goal", ""),
+            "reasoning": c.get("reasoning", ""),
+            "next_action": c.get("next_action", ""),
+            "open_loops": c.get("open_loops", []),
+        }
+
+    return jsonify({
+        "tally": eval_mod.tally_dict(results),
+        "pending": len(todo),
+        "judged": len(results),
+        "next": nxt,
+        "fields": eval_mod.FIELDS,
+    })
+
+
+@app.route("/api/eval/mark", methods=["POST"])
+def api_eval_mark():
+    body = request.json or {}
+    fname = body.get("file", "")
+    marks = body.get("marks", {})
+
+    path = CARDS / fname
+    if not fname.startswith("card_") or not path.exists():
+        return jsonify({"ok": False, "error": "unknown card"}), 400
+
+    clean = {}
+    for f in eval_mod.FIELDS:
+        v = marks.get(f)
+        clean[f] = v if v in (True, False) else None  # None = not applicable
+
+    try:
+        c = json.loads(path.read_text())
+    except Exception:
+        return jsonify({"ok": False, "error": "unreadable card"}), 400
+
+    results = eval_mod.record(eval_mod.load_results(), fname, c, clean)
+    return jsonify({"ok": True, "tally": eval_mod.tally_dict(results)})
+
+
 # --- Page -----------------------------------------------------------------
 
 PAGE = r"""
@@ -502,6 +564,39 @@ PAGE = r"""
   }
   .park input:focus { outline:none; border-color:var(--accent); }
 
+  .scoring {
+    background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:22px 24px; margin-bottom:18px;
+  }
+  .scoring h2 { font-size:11px; letter-spacing:.14em; color:var(--dim);
+                font-weight:600; margin:0 0 12px; }
+  .tally { font-size:14px; margin:0 0 4px; }
+  .tally b { font-variant-numeric:tabular-nums; }
+  .tally .ok { color:var(--good); }
+  .tally .mid { color:var(--warn); }
+  .tally .bad { color:var(--bad); }
+  .truth {
+    margin:14px 0 6px; padding:10px 14px; border-left:2px solid var(--good);
+    background:rgba(123,207,158,.08); font-style:italic; font-size:13.5px;
+  }
+  .judge-row {
+    display:flex; align-items:flex-start; gap:10px; padding:9px 0;
+    border-bottom:1px solid var(--line); font-size:13.5px;
+  }
+  .judge-row:last-child { border-bottom:none; }
+  .judge-row .lbl { width:96px; flex:none; color:var(--dim); font-size:12px;
+                    padding-top:3px; }
+  .judge-row .val { flex:1; }
+  .judge-row .btns { flex:none; display:flex; gap:4px; }
+  .judge-row button {
+    padding:3px 10px; font-size:12px; border-radius:6px; min-width:30px;
+  }
+  .judge-row button.on-y { background:var(--good); border-color:var(--good);
+                           color:#0f1115; font-weight:600; }
+  .judge-row button.on-n { background:var(--bad); border-color:var(--bad);
+                           color:#0f1115; font-weight:600; }
+  .judge-row button.on-na { background:var(--dim); border-color:var(--dim);
+                            color:#0f1115; font-weight:600; }
   .hist h2 { font-size:11px; letter-spacing:.14em; color:var(--dim); margin:0 0 10px; }
   .hitem {
     padding:10px 0; border-bottom:1px solid var(--line);
@@ -554,6 +649,8 @@ PAGE = r"""
   </div>
 
   <div id="card-slot"></div>
+
+  <div class="scoring" id="scoring"></div>
 
   <div class="hist" id="hist"></div>
 </div>
@@ -676,6 +773,100 @@ async function park() {
   i.placeholder = "Parked. It will be treated as truth on the next card.";
 }
 
+// --- scoring ---------------------------------------------------------
+// Only cards generated while a park note was active can be scored: the
+// note is the user's own words, written before the model saw anything.
+let marks = {};
+
+function tallyLine(t) {
+  const cell = (ok, n) => {
+    if (!n) return null;
+    const p = 100 * ok / n;
+    const cls = p >= 70 ? "ok" : (p >= 50 ? "mid" : "bad");
+    return `<span class="${cls}">${ok}/${n}</span>`;
+  };
+  const parts = [];
+  for (const [f, v] of Object.entries(t.fields)) {
+    const c = cell(v.correct, v.judged);
+    if (c) parts.push(`${f.replace("_", " ")} <b>${c}</b>`);
+  }
+  if (!parts.length) return "";
+  const o = cell(t.overall.correct, t.overall.judged);
+  return parts.join(" · ") + ` · overall <b>${o}</b> (${t.percent}%)`;
+}
+
+async function drawScoring() {
+  let e;
+  try { e = await (await fetch("/api/eval")).json(); }
+  catch (err) { return; }
+
+  const el = document.getElementById("scoring");
+  const line = tallyLine(e.tally);
+
+  if (!e.next) {
+    el.innerHTML = e.tally.overall.judged
+      ? `<h2>ACCURACY</h2><p class="tally">${line}</p>
+         <p class="tally" style="color:var(--dim);font-size:12.5px">
+         ${e.judged} card(s) scored · nothing left to judge</p>`
+      : `<h2>ACCURACY</h2><p class="tally" style="color:var(--dim);font-size:13px">
+         Park a note before you step away. The card that follows can then be
+         scored against your own words.</p>`;
+    return;
+  }
+
+  const n = e.next;
+  if (marks.__file !== n.file) marks = {__file: n.file};
+
+  const row = (f, val) => {
+    const m = marks[f];
+    return `<div class="judge-row">
+      <div class="lbl">${f.replace("_", " ")}</div>
+      <div class="val">${esc(Array.isArray(val) ? val.join(" · ") : val) || "<i>(none)</i>"}</div>
+      <div class="btns">
+        <button class="${m===true?"on-y":""}" onclick="mark('${f}',true)">✓</button>
+        <button class="${m===false?"on-n":""}" onclick="mark('${f}',false)">✗</button>
+        <button class="${m===null?"on-na":""}" onclick="mark('${f}',null)">–</button>
+      </div></div>`;
+  };
+
+  el.innerHTML = `
+    <h2>ACCURACY</h2>
+    ${line ? `<p class="tally">${line}</p>` : ""}
+    <p class="tally" style="color:var(--dim);font-size:12.5px">
+      ${e.pending} card(s) awaiting your judgement</p>
+    <div class="truth">You said: “${esc(n.park_note)}”</div>
+    ${row("goal", n.goal)}
+    ${row("reasoning", n.reasoning)}
+    ${row("next_action", n.next_action)}
+    ${row("open_loops", n.open_loops)}
+    <div style="margin-top:14px;display:flex;gap:8px;align-items:center">
+      <button class="primary" onclick="saveMarks()">Save judgement</button>
+      <span style="font-size:12px;color:var(--dim)">
+        ✓ correct · ✗ wrong · – not applicable</span>
+    </div>`;
+}
+
+function mark(field, value) {
+  marks[field] = value;
+  drawScoring.pending = true;
+  drawScoring();
+}
+
+async function saveMarks() {
+  const file = marks.__file;
+  if (!file) return;
+  const body = {file, marks: {}};
+  for (const f of ["goal", "reasoning", "next_action", "open_loops"])
+    body.marks[f] = (f in marks) ? marks[f] : null;
+  await fetch("/api/eval/mark", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body)
+  });
+  marks = {};
+  drawScoring();
+}
+
 async function preflight() {
   const d = await (await fetch("/api/preflight")).json();
   document.getElementById("issues").innerHTML = (d.issues || []).map(i =>
@@ -693,7 +884,9 @@ document.addEventListener("visibilitychange", () => {
 
 preflight();
 tick();
+drawScoring();
 setInterval(tick, 2000);
+setInterval(drawScoring, 5000);
 </script>
 </body>
 </html>
