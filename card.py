@@ -47,12 +47,15 @@ CARD_SCHEMA = {
         "open_loops": {"type": "array", "items": {"type": "string"}},
         "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
         "evidence": {"type": "string"},
+        # Optional: filled only when the user's AI agent visibly kept
+        # working while they were away.
+        "agent_status": {"type": "string"},
     },
     "required": ["goal", "reasoning", "next_action", "open_loops",
                  "confidence", "evidence"],
 }
 
-REQUIRED_FIELDS = list(CARD_SCHEMA["properties"])
+REQUIRED_FIELDS = list(CARD_SCHEMA["required"])
 
 # Evidence that says nothing. See "the evidence field is load-bearing" in
 # SPEC.md: this is the hallucination tripwire, so it is checked, not trusted.
@@ -200,6 +203,14 @@ def build_prompt(frames, park, corrections=None, active=None, parked=None,
              if active.get("return_point") else ""),
             "",
         ]
+        crp = active.get("candidate_return_point")
+        if crp and crp.get("text"):
+            lines += [
+                "THE PERSON WAS LAST COMPOSING THIS, IN THEIR OWN WORDS "
+                "(authority just below a park note - weight it above "
+                f"anything inferred from pixels): \"{crp['text']}\"",
+                "",
+            ]
         if memory:
             lines.append("WHAT THIS THREAD'S OWN HISTORY SAYS (most relevant "
                          "first):")
@@ -239,6 +250,42 @@ def build_prompt(frames, park, corrections=None, active=None, parked=None,
             "screenshots seem to disagree with the note, the note wins.",
             "",
         ]
+
+    # Chat awareness: composed text is authorship; stitched text is scene
+    # context; the AI's restatement is never the person's words.
+    try:
+        import chat as chat_mod
+        metas = [m for _, m in frames]
+        any_chat = any(chat_mod.surface(m) for m in metas)
+        if any_chat:
+            lines += [chat_mod.CHAT_PROMPT_RULES, ""]
+
+            composed = [m["ax"]["composed"] for m in metas
+                        if (m.get("ax") or {}).get("composed")
+                        and chat_mod.surface(m)]
+            for ctext in composed[-2:]:
+                lines += [f'USER-AUTHORED (typed by the person themselves): '
+                          f'"{ctext}"', ""]
+
+            stitched = chat_mod.stitch(metas)
+            unattributed = [s for s in stitched if not s["attributed"]]
+            if unattributed:
+                lines.append("CHAT SCENE CONTEXT (unattributed - use for "
+                             "understanding the situation, NEVER quote as "
+                             "the person's words):")
+                for s in unattributed[-3:]:
+                    lines.append(f'  [{s["at"]}] {s["text"][:400]}')
+                lines.append("")
+
+            if any(m.get("agent_working") for m in metas):
+                lines += [
+                    "SIGNAL: while the person was away, their AI agent kept "
+                    "working (input idle, screen still changing on a chat "
+                    "surface). Report what the agent appears to have done or "
+                    "to be waiting on in agent_status - one sentence, only "
+                    "what is visible.", ""]
+    except Exception:
+        pass
 
     lines += [
         "You are looking at screenshots of one person's screen, taken a few "

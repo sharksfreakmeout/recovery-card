@@ -312,6 +312,20 @@ def osa(script: str) -> str:
         return ""
 
 
+def composed_value():
+    """The text of the focused input element - the user's draft.
+
+    Called ONLY after a frame is recognized as a chat surface, so an
+    editor's whole buffer is never slurped by accident. Capped short.
+    """
+    v = osa('tell application "System Events" to tell (first application '
+            'process whose frontmost is true) to get value of attribute '
+            '"AXValue" of value of attribute "AXFocusedUIElement" of it')
+    if v and v != "missing value":
+        return " ".join(v.split())[:500]
+    return ""
+
+
 def window_context():
     """Frontmost app plus its window titles.
 
@@ -502,6 +516,45 @@ def main():
                                    if switches.get("files", True) else [])
             ctx["ax"] = (ax_context(ctx["app"])
                          if switches.get("ax", True) else {})
+
+            # Chat awareness (dashboard-switchable). Composition capture
+            # runs only on recognized chat surfaces, never on editors.
+            if switches.get("chat", True):
+                try:
+                    import chat as chat_mod
+                    surf = chat_mod.surface(ctx)
+                    if surf:
+                        ctx["chat"] = surf
+                        draft = composed_value()
+                        if draft:
+                            ctx["ax"]["composed"] = draft
+                        if chat_mod.agent_working(
+                                ctx, dist >= DIFF_THRESHOLD):
+                            ctx["agent_working"] = True
+                            write_status(agent_working=True)
+                        elif is_engaged(snap):
+                            write_status(agent_working=False)
+                        # Typing into a chat input = authorship. Bank it as
+                        # the active thread's candidate return-point,
+                        # authority just below a park note.
+                        if T is not None and chat_mod.is_composing(ctx):
+                            try:
+                                active = graph["meta"].get("active_thread")
+                                if active:
+                                    T.add_history(
+                                        graph, active, "composed",
+                                        chat_mod.composed_text(ctx))
+                                    graph["threads"][active][
+                                        "candidate_return_point"] = {
+                                        "text": chat_mod.composed_text(ctx),
+                                        "at": ctx["timestamp"]}
+                                    T.save(graph)
+                                    log("      composed intent banked for "
+                                        f"{active}")
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
             final.with_suffix(".json").write_text(json.dumps(ctx, indent=2))
 
             # Continuous cheap classification -> live thread affinity.

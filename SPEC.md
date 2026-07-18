@@ -230,7 +230,40 @@ never forced at capture time.
 **Cost honesty.** Tiers 1–3 and all capture stay lightweight and continuous.
 The 12B runs only at interruption boundaries.
 
+## Addendum — Chat-aware capture
+
+Chat surfaces are where intent gets written in the user's own words, and
+where an AI restates it back. Opposite things; never confused.
+
+- **Recognition**: chat surfaces identified via app (Claude, ChatGPT
+  desktop), URL (claude.ai, chatgpt.com, gemini, perplexity, copilot, poe),
+  or pane hints (Cursor's composer). Text from them is tagged conversational.
+- **Authorship at composition**: text captured while the user actively types
+  into a recognized chat input is user-authored intent — the active thread's
+  candidate return-point, authority just below a park note.
+- **Temporal stitching**: chat text is overlap-deduplicated across the
+  rolling frame window into a wider conversation slice, with timestamps.
+  Stitched text is scene context only.
+- **Attribution by structure**: message boundaries parsed from the
+  accessibility tree where exposed (small per-surface adapters); the 12B is
+  additionally instructed, for chat windows, to separate the person's
+  messages from the AI's by layout and NEVER to treat the AI's restatement
+  of a request as the person's words.
+- **Confidence gate**: only composition-captured or structurally-attributed
+  text may be quoted or weighted as the user's intent. Unattributed or
+  stale-looking chat text is scene context for classification only — never
+  quoted as "you said."
+- **Agent-working detection**: input idle + screen still changing on a
+  chat/agent surface = the user's agent kept working. The card reports it:
+  "While you were away, your agent [finished X / is waiting on a question]."
+- **Limits, by design**: no reading any chat app's internal storage —
+  visible-surface capture only; everything local and git-ignored; the whole
+  mechanism excludable via the dashboard's "Chat awareness" switch.
+
 ## Future work (NOT built, listed so scope stays honest)
+
+- Consented chat-history connectors (full logs with explicit user consent) —
+  the real-Phossil path beyond visible-surface capture.
 
 - Calendar federation (Google multi-account + Notion) as the next context
   layer, with explicit consent.
