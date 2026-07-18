@@ -74,6 +74,15 @@ REQUIRED_FIELDS = list(CARD_SCHEMA["required"])
 
 # Evidence that says nothing. See "the evidence field is load-bearing" in
 # SPEC.md: this is the hallucination tripwire, so it is checked, not trusted.
+# Text that means the card is describing this app instead of the work.
+# Careful scope: the user's real project is named PLite, so project names
+# alone are NOT contamination - citing our windows/surfaces as the work is.
+import re as _re
+MIRROR_RE = _re.compile(
+    r"recovery card window|the recovery card|card window|flow card"
+    r"|plite (window|board|surface|overlay)|capture-to-card pipeline"
+    r"|your own card|this card('s)? (text|window)", _re.I)
+
 GENERIC_EVIDENCE = {
     "the screen", "the screenshot", "the image", "the user's screen",
     "various windows", "the windows", "the desktop", "screen content",
@@ -601,16 +610,33 @@ def generate():
             "frames": emergent["frames"],
         }
 
-    if graph is not None and active and not card.get("fail_closed"):
+    # MIRROR POISON check, ongoing rule: a card whose text cites PLite's
+    # own surfaces is contaminated. It is saved (replayability) but marked,
+    # excluded from history/tally display, and NEVER feeds the graph - no
+    # return-point, no nodes, no history from a card about the app itself.
+    # Note: the user's real project IS PLite, so thread names alone are not
+    # contamination; only citing our windows/surfaces as the work is.
+    _fname = f"card_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    mirror_hit = MIRROR_RE.search(
+        " ".join(str(card.get(k, "")) for k in
+                 ("evidence", "goal", "reasoning", "next_action")))
+    if mirror_hit:
+        card["contaminated"] = True
+        log(f"card is mirror-contaminated (cites '{mirror_hit.group(0)}') - "
+            "saved but excluded from history and graph")
+
+    if graph is not None and active and not card.get("fail_closed") \
+            and not card.get("contaminated"):
         try:
             import threads as T
             T.add_history(graph, active["id"], "card",
                           f"{card['goal']} → {card['next_action']}")
             T.touch(graph, active["id"], return_point=card["next_action"])
-            # Entities the model saw become (or refresh) map nodes.
+            # Entities the model saw become (or refresh) map nodes, with
+            # the card filename as provenance.
             for e in (card.get("entities") or [])[:4]:
                 T.upsert_node(graph, active["id"], e.get("kind", ""),
-                              e.get("label", ""), source="card")
+                              e.get("label", ""), source=_fname)
             T.save(graph)
         except Exception:
             pass
@@ -642,8 +668,7 @@ def generate():
     # the fact whether the automatic chain actually fired.
     card["trigger"] = os.environ.get("RECOVERY_TRIGGER", "cli")
 
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = CARDS / f"card_{stamp}.json"
+    path = CARDS / _fname
     path.write_text(json.dumps(card, indent=2))
     log(f"wrote {path.relative_to(ROOT)}")
     return card

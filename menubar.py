@@ -98,6 +98,16 @@ class RecoveryCard(rumps.App):
         self.item_next.set_callback(None)
 
         self.ensure_backend()
+        # Launching PLite means you want it watching - starting is the
+        # app's entire point, and the board/menu make stopping one tap.
+        # PLITE_NO_AUTOSTART=1 opts out.
+        if not os.environ.get("PLITE_NO_AUTOSTART"):
+            try:
+                s = api("/api/state")
+                if not s.get("running"):
+                    api("/api/capture/start", method="POST", payload={})
+            except Exception:
+                pass
         self.hotkey_active = False
         self._register_hotkey()
 

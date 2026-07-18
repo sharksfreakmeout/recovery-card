@@ -304,6 +304,30 @@ def update_affinity(g, tid, meta):
         if meta.get("app") and meta["app"] != "hidden":
             t["last_app"] = meta["app"]
 
+        # SOURCE CHIPS accrual: which apps (or domains, when AX gave us
+        # the URL) actually composed this thread. Only real classified
+        # frames land here - that is the chips' truth rule - and self
+        # frames never reach this code at all. Archived threads stop
+        # classifying, so their chips freeze naturally.
+        key = None
+        if url:
+            try:
+                host = url.split("//", 1)[-1].split("/", 1)[0]
+                key = host.removeprefix("www.")
+            except Exception:
+                key = None
+        if not key and meta.get("app") and meta["app"] != "hidden":
+            key = meta["app"]
+        if key:
+            agg = t.setdefault("sources_agg", {})
+            e = agg.get(key) or {"count": 0, "first": _now()}
+            e["count"] += 1
+            e["last"] = _now()
+            agg[key] = e
+            if len(agg) > 12:  # keep the store tiny; drop the stalest
+                stalest = min(agg, key=lambda k: agg[k]["last"])
+                del agg[stalest]
+
     active = g["meta"].get("active_thread")
     if tid and tid != active and aff.get(tid, 0) >= SWITCH_MOMENTUM:
         if active and active in g["threads"]:
@@ -411,6 +435,7 @@ def upsert_node(g, tid, kind, label, source="", sticky=False):
     for n in g["nodes"]:
         if n["thread"] == tid and n["label"].lower() == label.lower():
             n["last_seen"] = _now()
+            n["seen"] = n.get("seen", 1) + 1
             n["salience"] = min(5.0, n.get("salience", 1.0) + 0.5)
             if source and source not in n["sources"]:
                 n["sources"] = (n["sources"] + [source])[-8:]
@@ -421,7 +446,7 @@ def upsert_node(g, tid, kind, label, source="", sticky=False):
         "id": f"n{len(g['nodes'])}_{re.sub(r'[^a-z0-9]+', '-', label.lower())[:24]}",
         "thread": tid, "kind": kind, "label": label,
         "pinned": False, "resolved": False, "sticky": bool(sticky),
-        "salience": 1.0,
+        "salience": 1.0, "seen": 1,
         "first_seen": _now(), "last_seen": _now(),
         "sources": [source] if source else [],
     }
@@ -512,6 +537,20 @@ def resume_thread(g, tid):
     return True
 
 
+def chips(t, top=4):
+    """The apps/domains that composed a thread, recency-weighted.
+
+    A chip exists only because real classified frames back it. Returns
+    [{label, count, first, last}] plus a spillover count.
+    """
+    agg = t.get("sources_agg") or {}
+    ranked = sorted(agg.items(),
+                    key=lambda kv: (kv[1]["last"], kv[1]["count"]),
+                    reverse=True)
+    shown = [{"label": k, **v} for k, v in ranked[:top]]
+    return shown, max(0, len(ranked) - top)
+
+
 # --- Board data -----------------------------------------------------------
 
 def board(g):
@@ -524,12 +563,16 @@ def board(g):
                sorted((t for t in g["threads"].values()
                        if t["id"] != active_tid),
                       key=lambda t: t["last_seen"], reverse=True))
+    rows = []
+    for t in threads:
+        row = {k: t[k] for k in
+               ("id", "name", "status", "origin", "return_point",
+                "last_seen", "salience", "anchors")}
+        row["chips"], row["chips_more"] = chips(t)
+        rows.append(row)
     return {
         "active": active_tid,
-        "threads": [{k: t[k] for k in
-                     ("id", "name", "status", "origin", "return_point",
-                      "last_seen", "salience", "anchors")}
-                    for t in threads],
+        "threads": rows,
         "untagged_count": len(g["untagged"]),
         "affinity": g["affinity"],
     }

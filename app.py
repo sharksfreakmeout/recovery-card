@@ -118,9 +118,11 @@ def card_files():
     return sorted(CARDS.glob("card_*.json"), reverse=True)
 
 
-def load_card(path):
+def load_card(path, include_contaminated=False):
     try:
         c = json.loads(path.read_text())
+        if c.get("contaminated") and not include_contaminated:
+            return None  # mirror poison: excluded from display by default
         c["_file"] = path.name
         return c
     except Exception:
@@ -425,6 +427,8 @@ def api_thread_map(tid):
                        for n in more],
         "cards": thread_cards(t["name"]),
         "restorable": restorable(t),
+        "chips": threads_mod.chips(t)[0],
+        "chips_more": threads_mod.chips(t)[1],
     })
 
 
@@ -530,10 +534,25 @@ def api_node_why(nid):
     n = threads_mod.get_node(g, nid)
     if not n:
         return jsonify({"ok": False}), 404
-    return jsonify({"ok": True, "label": n["label"],
+    details = []
+    for s in n.get("sources", []):
+        if s.startswith("card_"):
+            c = load_card(CARDS / s, include_contaminated=True)
+            if c:
+                details.append({
+                    "kind": "card", "file": s,
+                    "at": c.get("generated_at", ""),
+                    "sentence": c.get("goal", ""),
+                    "contaminated": bool(c.get("contaminated"))})
+        elif s == "user":
+            details.append({"kind": "user",
+                            "sentence": "You added this yourself."})
+    return jsonify({"ok": True, "label": n["label"], "kind": n["kind"],
+                    "seen": n.get("seen", 1),
                     "first_seen": n.get("first_seen"),
                     "last_seen": n.get("last_seen"),
                     "sources": n.get("sources", []),
+                    "details": details,
                     "sticky": n.get("sticky", False)})
 
 
@@ -1965,6 +1984,18 @@ BOARD_PAGE = r"""
                  font-weight:600; }
   .thread .tag.act { color:var(--accent); }
 
+  .chiprow { display:flex; gap:6px; margin-top:10px; flex-wrap:wrap; }
+  .chip { font-size:11.5px; padding:3px 10px; border-radius:6px;
+          border:1px solid var(--line); background:transparent;
+          color:var(--dim); cursor:pointer; }
+  .chip:hover { color:var(--text); border-color:#4fd6be; }
+  .chip.more { cursor:default; border-style:dashed; }
+  .chippop { position:absolute; z-index:20; background:#1c2029;
+             border:1px solid var(--line); border-radius:10px;
+             padding:10px 14px; font-size:12.5px; color:var(--dim);
+             max-width:260px; box-shadow:0 10px 34px rgba(0,0,0,.5);
+             line-height:1.6; }
+  .chippop b { color:var(--text); }
   .emergent {
     border:1px dashed rgba(224,175,104,.55); border-radius:14px;
     padding:16px 20px; margin:14px 0; background:rgba(224,175,104,.05);
@@ -1987,15 +2018,18 @@ BOARD_PAGE = r"""
 
   <div class="quietrow" id="quiet"></div>
 
-  <div class="controls">
-    <button class="primary" onclick="imBack()">I'm back</button>
-  </div>
+  <div class="controls" id="controls"></div>
 
-  <div class="park">
-    <input type="text" id="park"
-           placeholder="Park it — one line about where you're leaving off"
-           onkeydown="if(event.key==='Enter')park()">
-    <button onclick="park()">Save</button>
+  <div style="margin:22px 0">
+    <div style="font-size:12.5px;color:var(--dim);margin-bottom:6px">
+      Park it — one line before you step away. It becomes truth on your
+      next card.</div>
+    <div class="park" style="margin:0">
+      <input type="text" id="park"
+             placeholder="e.g. “waiting on Joel's numbers, next: paste the conversion figure”"
+             onkeydown="if(event.key==='Enter')park()">
+      <button onclick="park()">Save</button>
+    </div>
   </div>
 
   <div id="emergent-slot"></div>
@@ -2010,6 +2044,47 @@ BOARD_PAGE = r"""
 <script>
 function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
 let running = false;
+
+function relAgo(iso) {
+  if (!iso) return "";
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 90) return "just now";
+  if (s < 3600) return Math.round(s/60) + "m ago";
+  if (s < 86400) return Math.round(s/3600) + "h ago";
+  return Math.round(s/86400) + "d ago";
+}
+
+// SOURCE CHIPS: the apps/domains whose classified frames composed the
+// thread. Quiet, one row, no color noise. A chip exists only because
+// real frames back it. Tap -> mini provenance.
+function chipRow(t) {
+  const c = t.chips || [];
+  if (!c.length) return "";
+  return `<div class="chiprow">` + c.map(ch =>
+    `<button class="chip" onclick="event.stopPropagation();
+       chipInfo(this, '${esc(ch.label)}', ${ch.count},
+                '${ch.first}', '${ch.last}', '${t.id}')">
+       ${esc(ch.label)}</button>`).join("") +
+    (t.chips_more ? `<span class="chip more">+${t.chips_more}</span>` : "") +
+    `</div>`;
+}
+
+function chipInfo(el, label, count, first, last, tid) {
+  document.querySelectorAll(".chippop").forEach(p => p.remove());
+  const pop = document.createElement("div");
+  pop.className = "chippop";
+  const r = el.getBoundingClientRect();
+  pop.style.left = Math.min(r.left, innerWidth - 280) + "px";
+  pop.style.top = (r.bottom + 6 + scrollY) + "px";
+  pop.innerHTML = `<b>${esc(label)}</b><br>
+    part of this thread since ${relAgo(first)} · ${count} moment${count===1?"":"s"}
+    · last ${relAgo(last)}<br>
+    <a href="/thread/${tid}" style="color:#4fd6be;font-size:12px">
+      see its cards on the map ›</a>`;
+  document.body.appendChild(pop);
+  setTimeout(() => document.addEventListener("click",
+    () => pop.remove(), {once: true}), 50);
+}
 
 async function tickBoard() {
   let b; try { b = await (await fetch("/api/board")).json(); } catch(e){ return; }
@@ -2026,10 +2101,12 @@ async function tickBoard() {
     return `<div class="thread ${act ? "active" : ""}" style="cursor:pointer"
                  onclick="location.href='/thread/${t.id}'">
       <div class="tag ${act ? "act" : ""}">${act ? "ACTIVE NOW" :
-        (t.origin === "emergent" ? "EMERGENT · HELD" : "HELD")}</div>
+        (t.origin === "emergent" ? "EMERGENT · HELD" : "HELD")}
+        <span style="font-weight:400;letter-spacing:0"> · ${act ? "active" : "last"} ${relAgo(t.last_seen)}</span></div>
       <div class="name">${esc(t.name)}</div>
       <div class="rp">${esc(t.return_point) ||
         "No return-point yet — one appears after the first card."}</div>
+      ${chipRow(t)}
     </div>`;
   }).join("");
 
@@ -2038,7 +2115,7 @@ async function tickBoard() {
     if (!em.dataset.shown) {
       em.dataset.shown = "1";
       em.innerHTML = `<div class="emergent">
-        <div class="q">This looks like a new thread forming. Keep it?</div>
+        <div class="q">Something new forming? Name it and PLite will hold it.</div>
         <div class="sample">${esc(b.emergent.sample_text)}</div>
         <div class="row">
           <input type="text" id="emname" placeholder="Name it — e.g. “Speaker repair”"
@@ -2068,23 +2145,36 @@ async function dismissEmergent() {
 async function tick() {
   let d; try { d = await (await fetch("/api/state")).json(); } catch(e){ return; }
   running = d.running;
-  // One quiet line. The board never shows machinery.
+
+  // WATCHING STATE IS UNMISSABLE. Not watching -> the board's single
+  // primary action is Start watching, right here. Watching -> the
+  // primary is Show my card, with a calm breathing indicator above.
+  const ctl = document.getElementById("controls");
+  ctl.innerHTML = running
+    ? `<button class="primary" onclick="showCard()">Show my card</button>`
+    : `<button class="primary" onclick="startWatching()">Start watching</button>`;
+
   const q = [];
-  // Silent generation law: RECONSTRUCTING is a background state, visible
-  // only in the menu bar (subtle) and the engine room. Here it is just
+  // Silent generation law: RECONSTRUCTING is background; here it is just
   // "watching" - a false idle-fire must cost nothing visible.
   if (["ACTIVE", "AWAY", "RECONSTRUCTING"].includes(d.mode))
-    q.push(`<span><span class="beat"></span>watching</span>`);
+    q.push(`<span><span class="beat"></span>watching · last capture ${esc(d.last_capture)}</span>`);
   else if (d.mode === "SUSPENDED") q.push(`<span>asleep — state saved</span>`);
   else if (d.mode === "PAUSED_PRIVATE") q.push(`<span>paused — a private app is in front</span>`);
   else if (d.mode === "CARD_READY") q.push(`<span>your card is ready</span>`);
-  else q.push(`<span>not watching — start in the <a class="engine" href="/engine">engine room</a></span>`);
+  else q.push(`<span>not watching</span>`);
   q.push(`<span class="${d.network === "OFFLINE" ? "off" : ""}">${d.network === "OFFLINE" ? "offline — fully on-device" : "on-device"}</span>`);
+  if (d.last_card && d.last_card !== "never")
+    q.push(`<span>last card ${esc(d.last_card)}</span>`);
   document.getElementById("quiet").innerHTML = q.join(" · ");
 }
 
-// "I'm back" summons the return surface - the calm, card-only view.
-async function imBack() {
+async function startWatching() {
+  await fetch("/api/capture/start", {method:"POST"});
+  setTimeout(tick, 500);
+}
+// Summons the return surface - the calm, card-only view.
+async function showCard() {
   await fetch("/api/summon", {method:"POST"});
 }
 async function park() {
@@ -2397,6 +2487,10 @@ MAP_PAGE = r"""
   .prov { padding:8px 12px; font-size:12.5px; color:var(--dim);
           max-width:240px; }
 
+  .chiprow { display:flex; gap:6px; margin:-14px 0 18px; flex-wrap:wrap; }
+  .chip { font-size:11.5px; padding:3px 10px; border-radius:6px;
+          border:1px solid var(--line); color:var(--dim); }
+  .chip.more { border-style:dashed; }
   .showmore { font-size:12.5px; color:var(--dim); background:none;
               border:none; cursor:pointer; padding:4px 0; }
   .showmore:hover { color:var(--text); }
@@ -2429,13 +2523,16 @@ MAP_PAGE = r"""
   <div class="statustag" id="ttag">…</div>
   <div class="thead" id="tname">…</div>
   <p class="theadline" id="thead">…</p>
+  <div class="chiprow" id="tchips"></div>
 
   <div id="mapbox"></div>
   <button class="showmore" id="more" style="display:none"
           onclick="showAll=!showAll; draw()">show more</button>
 
-  <div class="actions">
+  <div class="actions" style="flex-direction:column;align-items:flex-start;gap:4px">
     <button class="primary" onclick="resumeThread()">Resume this thread</button>
+    <span style="font-size:12px;color:var(--dim)">Makes this your active
+      thread and shows its latest card.</span>
   </div>
   <div id="restore-slot"></div>
 
@@ -2494,6 +2591,10 @@ function draw() {
   tag.className = "statustag " + (t.status === "active" ? "active" : "");
   document.getElementById("tname").textContent = t.name;
   document.getElementById("thead").textContent = data.headline;
+  document.getElementById("tchips").innerHTML = (data.chips || []).map(ch =>
+    `<span class="chip" title="part of this thread · ${ch.count} moments">
+       ${esc(ch.label)}</span>`).join("") +
+    (data.chips_more ? `<span class="chip more">+${data.chips_more}</span>` : "");
 
   // map
   const box = document.getElementById("mapbox");
@@ -2556,6 +2657,12 @@ function nodeMenu(ev, nid) {
   menuEl.style.left = Math.min(ev.pageX, window.innerWidth-230) + "px";
   menuEl.style.top = ev.pageY + "px";
   menuEl.innerHTML = `
+    <div class="prov" style="border-bottom:1px solid var(--line);margin-bottom:4px">
+      <span style="font-size:10px;letter-spacing:.1em;color:${
+        n.kind==="blocker" ? "#f7768e" : "var(--dim)"}">${esc(n.kind.toUpperCase())}</span><br>
+      <b style="color:var(--text)">${esc(n.label)}</b>
+      <div id="prov-line-${n.id}" style="margin-top:2px">…</div>
+    </div>
     <div class="inline"><input id="rn" value="${esc(n.label)}"
       onkeydown="if(event.key==='Enter')act('${nid}','rename',
         {value:document.getElementById('rn').value})"></div>
@@ -2568,6 +2675,14 @@ function nodeMenu(ev, nid) {
     <button onclick="act('${nid}','detach')">Detach from this thread</button>
     <button class="danger" onclick="act('${nid}','remove')">Not a thing — remove</button>`;
   document.body.appendChild(menuEl);
+  fetch(`/api/node/${nid}/why`).then(r=>r.json()).then(w => {
+    const el = document.getElementById("prov-line-" + nid);
+    if (!el) return;
+    const cards = (w.sources||[]).filter(s => s.startsWith("card_")).length;
+    const how = w.sources && w.sources.includes("user") ? "you added it"
+      : cards ? `from your card ${rel(w.first_seen)}` : "observed";
+    el.textContent = `${how} · seen ${w.seen || (w.sources||[]).length || 1}× since ${rel(w.first_seen)}`;
+  });
 }
 
 function moveMenu(nid) {
@@ -2583,13 +2698,21 @@ function moveMenu(nid) {
 function whyMenu(nid) {
   fetch(`/api/node/${nid}/why`).then(r=>r.json()).then(w => {
     if (!menuEl) return;
-    const src = (w.sources||[]).map(s =>
-      s === "card" ? "seen on a card" :
-      s === "user" ? "you added it" : esc(s)).join(", ") || "unknown";
-    menuEl.innerHTML = `<div class="prov">
-      First noticed ${rel(w.first_seen)} · last seen ${rel(w.last_seen)}.<br>
-      How it got here: ${src}.${w.sticky ?
-        "<br>You placed it here — it stays unless you move it." : ""}</div>`;
+    const rows = (w.details||[]).map(d =>
+      d.kind === "user"
+        ? `<div style="padding:5px 0">${esc(d.sentence)}</div>`
+        : `<div style="padding:5px 0;border-top:1px solid var(--line)">
+             <span style="color:var(--text)">“${esc(d.sentence)}”</span><br>
+             <a onclick="event.stopPropagation();openCard('${d.file}')"
+                style="color:#4fd6be;cursor:pointer">card ${rel(d.at)}</a>
+             ${d.contaminated ? " · <span style='color:#e0af68'>excluded card</span>" : ""}
+           </div>`).join("");
+    menuEl.innerHTML = `<div class="prov" style="max-width:280px">
+      <b style="color:var(--text)">${esc(w.label)}</b><br>
+      First noticed ${rel(w.first_seen)} · seen ${w.seen}× ·
+      last ${rel(w.last_seen)}.${w.sticky ?
+        "<br>You placed it here — it stays unless you move it." : ""}
+      ${rows}</div>`;
   });
 }
 

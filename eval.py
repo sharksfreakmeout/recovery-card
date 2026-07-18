@@ -66,6 +66,8 @@ def scored_cards():
             continue
         if c.get("rehearsal"):
             continue  # fence: rehearsal data never mixes into human tallies
+        if c.get("contaminated"):
+            continue  # mirror poison never enters the tally
         if c.get("park_note", "").strip():
             out.append((p, c))
     return out
