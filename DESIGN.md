@@ -108,3 +108,10 @@ plus Esc plus click-outside. Background: vibrancy blur + scrim.
 
 Violations found and not yet fixed are listed here, dated, so they are
 visible instead of silently shipped. (none currently)
+
+### Excluded-state copy (private apps)
+Calm and plain, never alarm-styled: menu bar "Paused — a private app is in
+front" (quiet ⏸ beside the bone, no coral, no flash); board quiet line
+"paused — a private app is in front". The app is never named in any log,
+status file, or UI string. Dashboard copy: "PLite never captures anything
+while these are in front."

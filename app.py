@@ -280,12 +280,18 @@ def headline(g, st):
                  if t.get("status") != "ambient"
                  and t["id"] != g["meta"].get("active_thread"))
     if active:
-        rp = active.get("return_point", "")
+        # Return-points are model text: strip engine-speak and trailing
+        # punctuation so concatenation can't produce "window.. You're".
+        rp = (active.get("return_point", "") or "").replace("`", "")
+        rp = " ".join(rp.split()).rstrip(".")
+        if len(rp) > 90:
+            rp = rp[:88].rstrip() + "…"
         h = f"You're on {active['name']}"
         if rp:
             h += f" — {rp}"
+        h += "."
         if others:
-            h += f". You're holding {others} other " + \
+            h += f" You're holding {others} other " + \
                  ("thread." if others == 1 else "threads.")
         return h
     if others:
@@ -594,6 +600,41 @@ def api_trust():
             "the local model on this Mac.",
         ],
     })
+
+
+@app.route("/api/private", methods=["GET", "POST"])
+def api_private():
+    """The exclusion list. Changes take effect within one capture cycle."""
+    if request.method == "GET":
+        d = trust_mod.read_private()
+        try:
+            r = subprocess.run(
+                ["osascript", "-e",
+                 'tell application "System Events" to get name of every '
+                 'application process whose background only is false'],
+                capture_output=True, text=True, timeout=5)
+            running = sorted({a.strip() for a in r.stdout.split(",")
+                              if a.strip()} - set(d["apps"]))
+        except Exception:
+            running = []
+        return jsonify({**d, "running": running})
+
+    body = request.json or {}
+    d = trust_mod.read_private()
+    action, kind = body.get("action"), body.get("kind", "apps")
+    value = (body.get("value") or "").strip()
+    if not value or kind not in ("apps", "domains"):
+        return jsonify({"ok": False, "error": "nothing to change"}), 400
+    items = set(d[kind])
+    if action == "add":
+        items.add(value)
+    elif action == "remove":
+        items.discard(value)
+    else:
+        return jsonify({"ok": False, "error": "unknown action"}), 400
+    d[kind] = sorted(items)
+    trust_mod.write_private(d)
+    return jsonify({"ok": True, **trust_mod.read_private()})
 
 
 @app.route("/api/trust/toggle", methods=["POST"])
@@ -2035,6 +2076,7 @@ async function tick() {
   if (["ACTIVE", "AWAY", "RECONSTRUCTING"].includes(d.mode))
     q.push(`<span><span class="beat"></span>watching</span>`);
   else if (d.mode === "SUSPENDED") q.push(`<span>asleep — state saved</span>`);
+  else if (d.mode === "PAUSED_PRIVATE") q.push(`<span>paused — a private app is in front</span>`);
   else if (d.mode === "CARD_READY") q.push(`<span>your card is ready</span>`);
   else q.push(`<span>not watching — start in the <a class="engine" href="/engine">engine room</a></span>`);
   q.push(`<span class="${d.network === "OFFLINE" ? "off" : ""}">${d.network === "OFFLINE" ? "offline — fully on-device" : "on-device"}</span>`);
@@ -2708,6 +2750,28 @@ TRUST_PAGE = r"""
     screenshots are kept and older ones are deleted as new ones arrive.</p>
   </div>
 
+  <div class="panel">
+    <h2>PRIVATE APPS</h2>
+    <p style="font-size:13.5px;margin:0 0 12px">PLite never captures anything
+    while these are in front. No screenshot, no window title, no clipboard —
+    those moments simply don't exist to it.</p>
+    <div id="private-list"></div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <select id="private-pick" style="flex:1;font:inherit;font-size:13.5px;
+        padding:9px 12px;border-radius:9px;border:1px solid var(--line);
+        background:var(--panel);color:var(--text)"></select>
+      <button onclick="addPickedPrivate()">Add</button>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <input type="text" id="private-free"
+             placeholder="Or type an app name — or a website like chase.com"
+             onkeydown="if(event.key==='Enter')addFreePrivate()">
+      <button onclick="addFreePrivate()">Add</button>
+    </div>
+    <p class="note">Takes effect immediately. The starter list was seeded
+    from apps on this Mac — remove anything you like.</p>
+  </div>
+
   <div class="panel danger">
     <h2>DELETE</h2>
     <div class="count-row">
@@ -2856,7 +2920,46 @@ async function doForget(id) {
   load();
 }
 
+// --- Private apps ------------------------------------------------------
+async function loadPrivate() {
+  let d; try { d = await (await fetch("/api/private")).json(); }
+  catch(e){ return; }
+  const rows = d.apps.map(a =>
+    `<div class="switch-row"><div class="name">${esc(a)}</div>
+     <button onclick="privateChange('remove','apps','${esc(a)}')">Remove</button>
+     </div>`)
+    .concat(d.domains.map(dm =>
+      `<div class="switch-row"><div class="name">${esc(dm)}
+        <span style="color:var(--dim);font-size:12px"> (website)</span></div>
+       <button onclick="privateChange('remove','domains','${esc(dm)}')">Remove</button>
+       </div>`));
+  document.getElementById("private-list").innerHTML = rows.join("") ||
+    `<div class="note">Nothing excluded right now.</div>`;
+  const pick = document.getElementById("private-pick");
+  pick.innerHTML = `<option value="">Running apps…</option>` +
+    d.running.map(a => `<option>${esc(a)}</option>`).join("");
+}
+async function privateChange(action, kind, value) {
+  await fetch("/api/private", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({action, kind, value})});
+  loadPrivate();
+}
+function addPickedPrivate() {
+  const v = document.getElementById("private-pick").value;
+  if (v) privateChange("add", "apps", v);
+}
+function addFreePrivate() {
+  const i = document.getElementById("private-free");
+  const v = i.value.trim();
+  if (!v) return;
+  privateChange("add", v.includes(".") && !v.includes(" ")
+    ? "domains" : "apps", v);
+  i.value = "";
+}
+
 load();
+loadPrivate();
 setInterval(load, 3000);
 </script>
 </body>
@@ -2942,6 +3045,10 @@ OVERLAY_PAGE = r"""
   .hint { margin-top:22px; text-align:center; font-size:12px;
           color:rgba(255,255,255,.45); }
   .headline { font-size:15px; color:#9aa3b2; margin:0 0 6px; line-height:1.5; }
+  .coverage { font-size:12px; color:#8b93a1; margin:0 0 10px; }
+  .upchip { display:inline-block; padding:2px 8px; border-radius:6px;
+            font-size:11px; background:rgba(79,214,190,.14); color:#4fd6be;
+            font-style:normal; }
   .awayline { font-size:13px; color:#e0af68; margin:0 0 14px; }
   .parked { font-size:13.5px; color:#9aa3b2; padding:6px 0;
             border-bottom:1px solid rgba(255,255,255,.06); }
@@ -2982,6 +3089,26 @@ function close() {
   // If the bridge is not ready, tell the backend to kill the overlay
   // process. There is always a way out.
   fetch("/api/overlay/close", {method: "POST"});
+}
+
+// TEMPORAL ANCHOR: what slice of time the card actually saw, plain words.
+function fmtClock(iso) {
+  const d = new Date(iso);
+  let h = d.getHours(), m = String(d.getMinutes()).padStart(2, "0");
+  const ap = h >= 12 ? "PM" : "AM"; h = h % 12 || 12;
+  return `${h}:${m} ${ap}`;
+}
+function agoWords(iso) {
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 90) return "just now";
+  if (s < 3600) return `${Math.round(s/60)} min ago`;
+  return `${Math.round(s/360)/10} h ago`;
+}
+function coverageLine(c) {
+  if (!c || !c.coverage) return "";
+  const a = fmtClock(c.coverage.start), b2 = fmtClock(c.coverage.end);
+  return `<p class="coverage">From your screen, ${a === b2 ? a :
+    a + "–" + b2} · ${agoWords(c.generated_at)}</p>`;
 }
 
 // Escape and click-outside only. Enter and Space are deliberately NOT
@@ -3056,6 +3183,7 @@ async function drawReadonly() {
       <button class="x" onclick="close()" title="Dismiss">&times;</button>
       <p class="headline">An earlier card${c.thread ? " from " + esc(c.thread) : ""}
         · ${esc((c.generated_at||"").replace("T"," "))}</p>
+      ${coverageLine(c)}
       <h2>PICK UP HERE</h2>
       <p class="goal">${esc(c.goal)}</p>
       <p class="reason">${esc(c.reasoning)}</p>
@@ -3078,9 +3206,15 @@ async function draw() {
   } catch (e) { return; }
 
   const stage = document.getElementById("stage");
-  const reconstructing = d.mode === "RECONSTRUCTING" || (!d.card && d.running);
+  // SUMMON SEMANTICS: an existing card ALWAYS shows instantly, with its
+  // age. A stale card refreshes in the background and swaps in quietly.
+  // The blocking "reading" state exists only when no card has ever been
+  // generated.
+  const updating = d.mode === "RECONSTRUCTING" ||
+                   d.reconstructing_for !== null;
+  const reconstructing = !d.card;
   const sig = JSON.stringify([reconstructing, d.card ? d.card._file : null,
-                              verdicts, b.headline]);
+                              verdicts, b.headline, updating]);
   if (sig === lastSig) {
     if (reconstructing) {
       const el = document.getElementById("elapsed");
@@ -3088,9 +3222,11 @@ async function draw() {
     }
     return;
   }
+  const swapped = lastSig && d.card &&
+    JSON.parse(lastSig)[1] && JSON.parse(lastSig)[1] !== d.card._file;
   lastSig = sig;
 
-  if (reconstructing) {
+  if (reconstructing && d.running) {
     // Dismissable even here. A full-screen surface with no exit, at any
     // moment, is a trap; the generation keeps running in the background
     // and the finished card waits on the board.
@@ -3119,11 +3255,14 @@ async function draw() {
   const f = c._file;
   const away = d.away_summary ? `<p class="awayline">${esc(d.away_summary)}</p>` : "";
   const parked = (c.parked || []).filter(p => p.name !== c.thread);
+  const chip = swapped ? `<span class="upchip">updated just now</span>` :
+    (updating ? `<span class="upchip">updating…</span>` : "");
 
   stage.innerHTML = `
     <div class="card">
       <button class="x" onclick="close()" title="Dismiss">&times;</button>
-      <p class="headline">${esc(b.headline)}</p>
+      <p class="headline">${esc(b.headline)} ${chip}</p>
+      ${coverageLine(c)}
       ${away}
       ${flag}
       ${c.agent_status ? `<div class="said">While you were away: ${esc(c.agent_status)}</div>` : ""}

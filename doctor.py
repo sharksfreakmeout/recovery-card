@@ -132,6 +132,31 @@ def main():
     check("global hotkey (⌃⌥⌘R)", hk_state == "active", hk_state,
           warn=hk_state != "active")
 
+    # 6d. Private-app exclusion: with an excluded app "frontmost" (test
+    # hook), a brief capture run must write ZERO frames.
+    try:
+        import trust as trust_mod
+        priv = trust_mod.read_private()
+        target = (priv["apps"] or ["Messages"])[0]
+        import glob as _g
+        before = set(_g.glob(str(ROOT / "captures" / "frame_*")))
+        env = dict(os.environ)
+        env.update({"RC_TEST_FRONT_APP": target, "CAPTURE_INTERVAL": "1",
+                    "IDLE_THRESHOLD": "9999"})
+        p = subprocess.Popen([sys.executable, str(ROOT / "capture.py")],
+                             env=env, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        time.sleep(4)
+        p.terminate(); p.wait(timeout=5)
+        after = set(_g.glob(str(ROOT / "captures" / "frame_*")))
+        leaked = len(after - before)
+        check("private-app exclusion (total gap)", leaked == 0,
+              f"{len(priv['apps'])} app(s) excluded; 0 frames written "
+              "while private app frontmost" if leaked == 0 else
+              f"{leaked} frame(s) LEAKED during excluded time")
+    except Exception as e:
+        check("private-app exclusion (total gap)", False, str(e))
+
     # 6c. Rehearsal driver: keystroke synthesis needs Accessibility for
     # the process that runs `plite rehearse` (this terminal).
     try:

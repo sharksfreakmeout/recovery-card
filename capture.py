@@ -155,6 +155,32 @@ def frame_distance(a, b) -> float:
     return sum(abs(x - y) for x, y in zip(a, b)) / len(a)
 
 
+# --- Self-exclusion (the mirror bug) ---------------------------------------
+# Frames where a PLite surface is frontmost are tagged self and NEVER sent
+# to card inference. Without this, the model reconstructs the person
+# "looking at their Recovery Card" and lifts instructions from the card's
+# own text as the next action - the system watching itself in a mirror.
+
+_SELF_TITLES = ("recovery card", "plite", "rehearsal")
+
+
+def is_self_surface(ctx):
+    """Is the frontmost window one of ours?
+
+    Matches our native windows (overlay/window/banner run as Python with
+    our titles) and the board/engine/trust/map pages open in any browser
+    tab. Deliberately matches on OUR title strings only - a user's editor
+    open on this repo is their real work, not a mirror.
+    """
+    title = (ctx.get("window_title") or "").lower()
+    tab = ((ctx.get("ax") or {}).get("tab") or "").lower()
+    for t in (title, tab):
+        if any(t.startswith(s) or f"{s} —" in t or f"{s} -" in t
+               for s in _SELF_TITLES):
+            return True
+    return False
+
+
 # --- Window context -------------------------------------------------------
 
 # --- Engagement (timing only, never content) -------------------------------
@@ -679,6 +705,37 @@ def main():
             time.sleep(max(0.0, CAPTURE_INTERVAL - (time.time() - cycle_start)))
             continue
 
+        # PRIVATE APPS: enforced BEFORE the screenshot. While an excluded
+        # app is frontmost the gap is total - no frame, no metadata, no
+        # clipboard. The log and status deliberately never name the app.
+        front = os.environ.get("RC_TEST_FRONT_APP") or osa(
+            'tell application "System Events" to get name of first '
+            'application process whose frontmost is true')
+        front_url = ""
+        if front in ("Google Chrome", "Safari", "Arc", "Brave Browser"):
+            try:
+                import trust as _t
+                if _t.read_private()["domains"]:
+                    # only pay for the URL when a domain rule exists
+                    front_url = osa(
+                        f'tell application "{front}" to get URL of active '
+                        'tab of front window'
+                        if front != "Safari" else
+                        'tell application "Safari" to get URL of front '
+                        'document')
+            except Exception:
+                pass
+        try:
+            import trust as _t
+            if _t.is_private(front, front_url):
+                write_status("PAUSED_PRIVATE")
+                log("paused (a private app is in front)")
+                time.sleep(max(0.0, CAPTURE_INTERVAL -
+                               (time.time() - cycle_start)))
+                continue
+        except Exception:
+            pass
+
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         tmp = CAPTURES / f"pending_{stamp}.png"
 
@@ -728,6 +785,8 @@ def main():
             if os.environ.get("RC_REHEARSAL") or \
                     (ROOT / ".rehearsal_on").exists():
                 ctx["rehearsal"] = True  # fence: never mixes with real data
+            if is_self_surface(ctx):
+                ctx["self"] = True  # mirror fence: never reaches inference
             ctx["diff_from_previous"] = round(dist, 2) if prev_fp else None
             ctx["engagement"] = snap
             if switches.get("clipboard", True):
@@ -780,8 +839,10 @@ def main():
             final.with_suffix(".json").write_text(json.dumps(ctx, indent=2))
 
             # Continuous cheap classification -> live thread affinity.
-            # Failure here must never stop capture.
-            if T is not None:
+            # Failure here must never stop capture. Self frames never
+            # classify: staring at your own board must not build affinity
+            # or feed centroids.
+            if T is not None and not ctx.get("self"):
                 try:
                     # Reload before every write cycle. Holding the graph in
                     # memory here silently clobbered every write the app

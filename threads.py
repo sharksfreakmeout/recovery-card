@@ -144,8 +144,11 @@ def touch(g, tid, return_point=None):
         return
     t["last_seen"] = _now()
     if return_point:
-        t["return_point"] = return_point
-        t["history"].append({"kind": "return_point", "text": return_point,
+        # DESIGN.md voice: no engine-speak reaches the user. Return-points
+        # are shown verbatim on the board and in headlines.
+        rp = " ".join(return_point.replace("`", "").split())
+        t["return_point"] = rp
+        t["history"].append({"kind": "return_point", "text": rp,
                              "at": _now()})
 
 

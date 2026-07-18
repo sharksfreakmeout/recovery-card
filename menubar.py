@@ -229,6 +229,10 @@ class RecoveryCard(rumps.App):
         elif mode == "CARD_READY":
             self.title = f"{BONE} ●"
             self.item_state.title = "Card ready"
+        elif mode == "PAUSED_PRIVATE":
+            # Quiet paused glyph. The app is deliberately never named.
+            self.title = f"{BONE} ⏸"
+            self.item_state.title = "Paused — a private app is in front"
         else:
             self.title = BONE
             self.item_state.title = "Not capturing"

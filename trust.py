@@ -58,6 +58,64 @@ def enabled(name):
     return read_settings().get(name, True)
 
 
+# --- Private apps (exclusion zones) -----------------------------------------
+# Enforced AT CAPTURE, not at inference: while an excluded app is frontmost
+# no frame is written, no metadata logged, no clipboard read. The gap is
+# total - excluded moments never exist on disk.
+
+PRIVATE = ROOT / "private_apps.json"
+
+# Pre-seeded candidates, but only ones actually present on this Mac, and
+# always VISIBLE on the dashboard - a promise the user can see and edit,
+# never a hidden default.
+_STARTER_CANDIDATES = [
+    "Messages", "FaceTime", "Keychain Access", "1Password", "Bitwarden",
+    "KeePassXC", "Dashlane", "Signal", "WhatsApp",
+]
+
+
+def _installed(app):
+    from pathlib import Path as _P
+    return any((_P(base) / f"{app}.app").exists() for base in
+               ("/Applications", "/System/Applications",
+                "/System/Applications/Utilities"))
+
+
+def read_private():
+    if PRIVATE.exists():
+        try:
+            d = json.loads(PRIVATE.read_text())
+            return {"apps": sorted(set(d.get("apps", []))),
+                    "domains": sorted(set(d.get("domains", [])))}
+        except Exception:
+            pass
+    # first run: seed with what is actually installed, visibly
+    seeded = {"apps": sorted(a for a in _STARTER_CANDIDATES
+                             if _installed(a)),
+              "domains": []}
+    write_private(seeded)
+    return seeded
+
+
+def write_private(d):
+    tmp = PRIVATE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(
+        {"apps": sorted(set(d.get("apps", []))),
+         "domains": sorted(set(d.get("domains", [])))}, indent=2))
+    tmp.replace(PRIVATE)
+
+
+def is_private(app, url=""):
+    d = read_private()
+    if app and app in d["apps"]:
+        return True
+    if url:
+        low = url.lower()
+        if any(dom and dom.lower() in low for dom in d["domains"]):
+            return True
+    return False
+
+
 # --- Data on hand (live, from disk) ----------------------------------------
 
 def data_on_hand():
