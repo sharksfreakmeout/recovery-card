@@ -26,3 +26,6 @@ __pycache__/
 venv/
 .DS_Store
 logs/
+
+# The thread graph holds real work content (thread names, return points).
+graph.json
