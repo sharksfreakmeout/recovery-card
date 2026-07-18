@@ -28,6 +28,72 @@ NS_CAN_JOIN_ALL_SPACES = 1 << 0
 NS_FULLSCREEN_AUXILIARY = 1 << 8
 
 
+_ESC_MONITOR = None  # module-level so the monitor is never garbage collected
+
+
+def _elevate_on_main():
+    """The actual AppKit work. MUST run on the main thread.
+
+    Touching NSWindow from a background thread kills the process natively,
+    with no Python traceback to explain it - the overlay simply vanishes a
+    second after opening.
+    """
+    global _ESC_MONITOR
+    try:
+        from AppKit import NSApp, NSScreen, NSEvent
+        scr = NSScreen.mainScreen().frame().size
+
+        # Only OUR window. pywebview owns small internal helper windows too,
+        # and elevating those to the top layer puts stray boxes on screen.
+        target, best = None, -1
+        for w in NSApp.windows():
+            f = w.frame()
+            area = f.size.width * f.size.height
+            if area > best:
+                target, best = w, area
+
+        if target is None:
+            print("overlay: no window found", file=sys.stderr, flush=True)
+            return
+
+        # Order matters. While the window sits at a normal level, macOS
+        # constrains it so it cannot cover the menu bar, silently shifting
+        # it down by the menu bar's height. Raise the level first, then set
+        # the frame, and it snaps to the full screen as intended.
+        target.setLevel_(NS_SCREEN_SAVER_LEVEL)
+        target.setFrame_display_(NSScreen.mainScreen().frame(), True)
+        target.setCollectionBehavior_(
+            NS_CAN_JOIN_ALL_SPACES | NS_FULLSCREEN_AUXILIARY)
+        target.makeKeyAndOrderFront_(None)
+        NSApp.activateIgnoringOtherApps_(True)
+
+        # A native escape hatch. The web page also listens for Escape, but
+        # if the page has not finished loading, or focus is anywhere other
+        # than the web view, that listener never fires and the overlay
+        # becomes a trap covering the whole screen. This catches the key at
+        # the AppKit layer, so Escape always works.
+        def on_key(event):
+            if event.keyCode() == 53:  # Escape
+                print("overlay: dismissed (escape)", file=sys.stderr,
+                      flush=True)
+                NSApp.terminate_(None)
+                return None
+            return event
+
+        _ESC_MONITOR = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+            1 << 10, on_key)  # NSEventMaskKeyDown
+
+        f = target.frame()
+        print(f"overlay: frame={int(f.size.width)}x{int(f.size.height)} "
+              f"at ({int(f.origin.x)},{int(f.origin.y)})  "
+              f"screen={int(scr.width)}x{int(scr.height)}  "
+              f"level={target.level()}  visible={bool(target.isVisible())}  "
+              f"key={bool(target.isKeyWindow())}",
+              file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"overlay: elevate failed: {e}", file=sys.stderr, flush=True)
+
+
 def elevate():
     """Lift the overlay above full-screen Spaces.
 
@@ -41,16 +107,13 @@ def elevate():
     actually looking at, which is the only behaviour that makes sense for
     something summoned by hotkey.
     """
-    time.sleep(1.0)  # let the NSWindow exist first
+    time.sleep(1.2)  # let the NSWindow exist first
     try:
-        from AppKit import NSApp
-        for w in NSApp.windows():
-            w.setLevel_(NS_SCREEN_SAVER_LEVEL)
-            w.setCollectionBehavior_(
-                NS_CAN_JOIN_ALL_SPACES | NS_FULLSCREEN_AUXILIARY)
-            w.makeKeyAndOrderFront_(None)
-    except Exception:
-        pass  # a visible overlay on the desktop beats no overlay at all
+        from PyObjCTools import AppHelper
+        AppHelper.callAfter(_elevate_on_main)
+    except Exception as e:
+        print(f"overlay: could not schedule elevate: {e}",
+              file=sys.stderr, flush=True)
 
 
 class Api:

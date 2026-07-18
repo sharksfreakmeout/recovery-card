@@ -359,6 +359,20 @@ def open_overlay():
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+@app.route("/api/overlay/close", methods=["POST"])
+def api_overlay_close():
+    """Last-resort dismissal. A full-screen overlay must never be a trap."""
+    global _overlay_proc
+    killed = False
+    if _overlay_proc and _overlay_proc.poll() is None:
+        _overlay_proc.terminate()
+        killed = True
+    else:
+        subprocess.run(["pkill", "-f", "overlay.py"], capture_output=True)
+        killed = True
+    return jsonify({"ok": killed})
+
+
 @app.route("/overlay")
 def overlay_page():
     """The card alone, on nothing. Rendered into a blurred full-screen
@@ -753,7 +767,16 @@ OVERLAY_PAGE = r"""
     #stage { background:rgba(236,238,242,.55); }
   }
   @keyframes fade { from { opacity:0; } to { opacity:1; } }
+  /* Always a visible way out. Escape is handled natively as well, but a
+     full-screen overlay must never depend on a keystroke to escape. */
+  .x {
+    position:absolute; top:16px; right:18px; width:30px; height:30px;
+    border:none; border-radius:50%; cursor:pointer; font-size:19px;
+    line-height:1; background:rgba(255,255,255,.09); color:#9aa3b2;
+  }
+  .x:hover { background:rgba(255,255,255,.16); color:#fff; }
   .card {
+    position:relative;
     width:min(680px, 92vw); max-height:88vh; overflow-y:auto;
     background:rgba(22,24,30,.82); color:#f2f4f8;
     border:1px solid rgba(255,255,255,.10);
@@ -805,8 +828,15 @@ OVERLAY_PAGE = r"""
 function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
 
 function close() {
-  if (window.pywebview && window.pywebview.api && window.pywebview.api.close)
-    window.pywebview.api.close();
+  try {
+    if (window.pywebview && window.pywebview.api && window.pywebview.api.close) {
+      window.pywebview.api.close();
+      return;
+    }
+  } catch (e) {}
+  // If the bridge is not ready, tell the backend to kill the overlay
+  // process. There is always a way out.
+  fetch("/api/overlay/close", {method: "POST"});
 }
 
 // Escape and click-outside only. Enter and Space are deliberately NOT
@@ -819,17 +849,33 @@ document.addEventListener("click", e => {
   if (!e.target.closest(".card")) close();
 });
 
+// Rebuilding the DOM on every poll re-runs the entrance animation and makes
+// the card visibly blink every 2 seconds. Only redraw when what is being
+// shown actually changes; while reconstructing, tick the counter alone.
+let lastSig = null;
+
 async function draw() {
   let d;
   try { d = await (await fetch("/api/state")).json(); }
   catch (e) { return; }
 
   const stage = document.getElementById("stage");
+  const reconstructing = d.mode === "RECONSTRUCTING" || (!d.card && d.running);
+  const sig = JSON.stringify([reconstructing, d.card ? d.card._file : null]);
 
-  if (d.mode === "RECONSTRUCTING" || (!d.card && d.running)) {
+  if (sig === lastSig) {
+    if (reconstructing) {
+      const el = document.getElementById("elapsed");
+      if (el) el.textContent = (d.reconstructing_for ?? 0) + "s";
+    }
+    return;
+  }
+  lastSig = sig;
+
+  if (reconstructing) {
     stage.innerHTML = `<div class="card waiting"><div class="spin"></div>
       <div>Reading your screens…</div>
-      <div class="hint">${d.reconstructing_for ?? 0}s</div></div>`;
+      <div class="hint" id="elapsed">${d.reconstructing_for ?? 0}s</div></div>`;
     return;
   }
 
@@ -848,6 +894,7 @@ async function draw() {
 
   stage.innerHTML = `
     <div class="card">
+      <button class="x" onclick="close()" title="Dismiss">&times;</button>
       ${flag}
       <h2>PICK UP HERE</h2>
       <p class="goal">${esc(c.goal)}</p>
