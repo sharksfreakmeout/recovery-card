@@ -422,7 +422,14 @@ def ask_model(model, prompt, images):
         "stream": False,
         "think": False,
         "format": CARD_SCHEMA,     # Ollama constrains output to this shape
-        "options": {"temperature": 0.2},
+        # The 12B unloads right after the card. Keeping 7.6 GB resident on
+        # unified memory is what made app switches stutter, and the card
+        # runs at interruption boundaries where a model load is invisible.
+        # Demo day: MODEL_KEEP_ALIVE=15m keeps it warm between takes.
+        "keep_alive": os.environ.get("MODEL_KEEP_ALIVE", "0"),
+        # 3 images and a compact prompt, not a novel.
+        "options": {"temperature": 0.2,
+                    "num_ctx": int(os.environ.get("CARD_NUM_CTX", 8192))},
     }
     out = ollama_json("/api/generate", payload, timeout=REQUEST_TIMEOUT)
     return out.get("response", "")

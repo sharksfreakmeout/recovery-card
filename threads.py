@@ -63,7 +63,10 @@ def embed(texts):
     try:
         req = urllib.request.Request(
             f"{OLLAMA}/api/embed",
-            data=json.dumps({"model": EMBED_MODEL, "input": texts}).encode(),
+            data=json.dumps({"model": EMBED_MODEL, "input": texts,
+                             # tiny (673 MB) and called continuously:
+                             # stays resident, unlike the 12B
+                             "keep_alive": "60m"}).encode(),
             headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.load(r).get("embeddings") or [None] * len(texts)

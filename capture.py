@@ -84,8 +84,14 @@ def write_status(mode=None, **fields):
 
 # --- Screen capture -------------------------------------------------------
 
+# Frames are stored ONLY at this width. A Retina screenshot is ~1.3 MB and
+# 3000px wide; the model reads it fine at half that, and the full-res
+# version never even touches disk for longer than the resample takes.
+FRAME_WIDTH = int(os.environ.get("FRAME_WIDTH", 1500))
+
+
 def grab_screen(dest: Path) -> bool:
-    """Screenshot the main display. Returns True on success.
+    """Screenshot the main display, downscaled immediately. True on success.
 
     Two macOS quirks worth knowing:
       - screencapture exits 0 even when it fails, so the only reliable
@@ -96,6 +102,9 @@ def grab_screen(dest: Path) -> bool:
     for args in (["-x", "-t", "png", "-D", "1"], ["-x", "-t", "png"]):
         subprocess.run(["screencapture", *args, str(dest)], capture_output=True)
         if dest.exists() and dest.stat().st_size > 0:
+            # Resample in place; the full-res file ceases to exist here.
+            subprocess.run(["sips", "--resampleWidth", str(FRAME_WIDTH),
+                            str(dest)], capture_output=True)
             return True
     return False
 
@@ -262,6 +271,23 @@ def recent_files(minutes=5, limit=5):
 
 
 # --- Accessibility enrichment (opportunistic, never required) ---------------
+
+# AX reads cost 2-3 osascript spawns each. Refreshing them on every kept
+# frame is what made app switches stutter, so they are throttled to focus
+# changes: a new frontmost app, or staleness past AX_MAX_AGE seconds.
+_ax_cache = {"app": None, "ax": {}, "at": 0.0}
+AX_MAX_AGE = float(os.environ.get("AX_MAX_AGE", 20))
+
+
+def ax_context_throttled(app_name):
+    now = time.time()
+    if (_ax_cache["app"] == app_name
+            and now - _ax_cache["at"] < AX_MAX_AGE):
+        return _ax_cache["ax"]
+    ax = ax_context(app_name)
+    _ax_cache.update({"app": app_name, "ax": ax, "at": now})
+    return ax
+
 
 def ax_context(app_name):
     """Structured detail about the frontmost app, where macOS offers it.
@@ -628,7 +654,7 @@ def main():
                     ctx["clipboard"] = clip
             ctx["recent_files"] = (recent_files()
                                    if switches.get("files", True) else [])
-            ctx["ax"] = (ax_context(ctx["app"])
+            ctx["ax"] = (ax_context_throttled(ctx["app"])
                          if switches.get("ax", True) else {})
 
             # Chat awareness (dashboard-switchable). Composition capture
