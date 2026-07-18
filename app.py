@@ -25,6 +25,7 @@ from flask import Flask, jsonify, render_template_string, request
 import capture
 import card as card_mod
 import eval as eval_mod
+import threads as threads_mod
 
 ROOT = Path(__file__).resolve().parent
 CAPTURES = ROOT / "captures"
@@ -209,7 +210,161 @@ def preflight():
 
 @app.route("/")
 def index():
+    """The front door: onboarding on first run, the board after."""
+    g = threads_mod.load()
+    if not g["meta"].get("onboarded"):
+        return render_template_string(ONBOARD_PAGE)
+    return render_template_string(BOARD_PAGE)
+
+
+@app.route("/engine")
+def engine_room():
+    """The old control-room page. Emergency fallback only."""
     return render_template_string(PAGE)
+
+
+# --- Thread + board API ---------------------------------------------------
+
+def headline(g, st):
+    """One plain sentence stating the situation. Recognition, not recall."""
+    active = g["threads"].get(g["meta"].get("active_thread"))
+    others = sum(1 for t in g["threads"].values()
+                 if t.get("status") != "ambient"
+                 and t["id"] != g["meta"].get("active_thread"))
+    if active:
+        rp = active.get("return_point", "")
+        h = f"You're on {active['name']}"
+        if rp:
+            h += f" — {rp}"
+        if others:
+            h += f". You're holding {others} other " + \
+                 ("thread." if others == 1 else "threads.")
+        return h
+    if others:
+        return (f"You're holding {others} " +
+                ("thread. " if others == 1 else "threads. ") +
+                "None is active right now.")
+    if st.get("mode") in ("ACTIVE", "AWAY", "CARD_READY", "RECONSTRUCTING"):
+        return "Watching quietly. Threads will appear as your work does."
+    return "Not watching yet. Start capture when you're ready."
+
+
+@app.route("/api/board")
+def api_board():
+    g = threads_mod.load()
+    st = read_status()
+    b = threads_mod.board(g)
+    b["headline"] = headline(g, st)
+    b["onboarded"] = bool(g["meta"].get("onboarded"))
+    b["emergent"] = threads_mod.emergent_candidate(g)
+    return jsonify(b)
+
+
+@app.route("/api/thread/add", methods=["POST"])
+def api_thread_add():
+    body = request.json or {}
+    name = (body.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "a thread needs a name"}), 400
+    g = threads_mod.load()
+    t = threads_mod.new_thread(
+        g, name,
+        origin=body.get("origin", "declared"),
+        anchors=body.get("anchors") or [name],
+        return_point=(body.get("return_point") or "").strip())
+    threads_mod.save(g)
+    return jsonify({"ok": True, "id": t["id"]})
+
+
+@app.route("/api/thread/confirm_emergent", methods=["POST"])
+def api_confirm_emergent():
+    body = request.json or {}
+    name = (body.get("name") or "").strip()
+    if not name:
+        return jsonify({"ok": False, "error": "a thread needs a name"}), 400
+    g = threads_mod.load()
+    prop = threads_mod.emergent_candidate(g)
+    if not prop:
+        return jsonify({"ok": False, "error": "nothing to confirm"}), 400
+    t = threads_mod.confirm_emergent(g, name, prop)
+    threads_mod.save(g)
+    return jsonify({"ok": True, "id": t["id"]})
+
+
+@app.route("/api/thread/dismiss_emergent", methods=["POST"])
+def api_dismiss_emergent():
+    """User said no: leave those frames ambient. Holding ambiguity is honest."""
+    g = threads_mod.load()
+    for u in g["untagged"][-threads_mod.EMERGENT_MIN_FRAMES:]:
+        u["engaged"] = False  # no longer counts toward a proposal
+    threads_mod.save(g)
+    return jsonify({"ok": True})
+
+
+# --- Onboarding API -------------------------------------------------------
+
+@app.route("/api/onboard/propose", methods=["POST"])
+def api_onboard_propose():
+    """Take ONE screenshot, run ONE inference, propose candidate threads.
+
+    This is the app proving its core capability in the first ten seconds:
+    it looks at the screen and says what threads it sees open. The user
+    confirms, renames, adds, or ignores - nothing is filed silently.
+    """
+    probe = CAPTURES / "onboard_probe.png"
+    CAPTURES.mkdir(exist_ok=True)
+    if not capture.grab_screen(probe):
+        return jsonify({"ok": False, "error":
+                        "Could not take a screenshot. Check Screen Recording "
+                        "permission, then try again."}), 500
+    try:
+        import base64 as b64
+        ctx = capture.window_context()
+        img = b64.b64encode(probe.read_bytes()).decode()
+        model, _ = card_mod.pick_model()
+        schema = {
+            "type": "object",
+            "properties": {"threads": {
+                "type": "array",
+                "items": {"type": "object", "properties": {
+                    "name": {"type": "string"},
+                    "evidence": {"type": "string"}},
+                    "required": ["name", "evidence"]}}},
+            "required": ["threads"]}
+        prompt = (
+            "Look at this screenshot of someone's Mac. Window titles: "
+            + "; ".join(ctx.get("window_titles", [])[:6]) +
+            ". Identify up to 4 distinct THREADS of work or attention that "
+            "seem open - projects, errands, conversations. Short human names "
+            "('Phossil production app', 'Mac speaker repair'), not app names. "
+            "For each, one sentence of on-screen evidence. Only what you can "
+            "actually see. JSON only.")
+        raw = card_mod.ollama_json("/api/generate", {
+            "model": model, "images": [img], "prompt": prompt,
+            "stream": False, "think": False, "format": schema,
+            "options": {"temperature": 0.2}}, timeout=180)
+        proposals = json.loads(raw.get("response", "{}")).get("threads", [])[:4]
+        return jsonify({"ok": True, "proposals": proposals})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    finally:
+        probe.unlink(missing_ok=True)
+
+
+@app.route("/api/onboard/complete", methods=["POST"])
+def api_onboard_complete():
+    body = request.json or {}
+    g = threads_mod.load()
+    for th in (body.get("threads") or [])[:8]:
+        name = (th.get("name") or "").strip()
+        if name and not any(t["name"].lower() == name.lower()
+                            for t in g["threads"].values()):
+            threads_mod.new_thread(g, name, origin="declared",
+                                   anchors=[name] + (th.get("anchors") or []))
+    g["meta"]["onboarded"] = True
+    g["meta"]["onboarded_at"] = datetime.now().isoformat(timespec="seconds")
+    threads_mod.save(g)
+    return jsonify({"ok": True, "threads": len(g["threads"])})
 
 
 @app.route("/api/state")
@@ -1089,6 +1244,660 @@ def choose_port():
         if not port_busy(port):
             return port, True
     return preferred, True
+
+
+_BASE_CSS = r"""
+  :root {
+    --bg:#0f1115; --panel:#171a21; --line:#252a34;
+    --text:#e6e8ec; --dim:#8b93a1; --accent:#7aa2f7;
+    --good:#7bcf9e; --warn:#e0af68; --bad:#f7768e;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font:15.5px/1.65 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    padding:34px 22px 70px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap { max-width:700px; margin:0 auto; }
+  button {
+    font:inherit; font-size:14.5px; padding:10px 20px; border-radius:9px;
+    border:1px solid var(--line); background:var(--panel); color:var(--text);
+    cursor:pointer; transition:border-color .2s ease;
+  }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); border-color:var(--accent);
+                   color:#0f1115; font-weight:600; }
+  button.quiet { background:transparent; color:var(--dim); }
+  input[type=text] {
+    font:inherit; font-size:14.5px; padding:10px 14px; border-radius:9px;
+    border:1px solid var(--line); background:var(--panel); color:var(--text);
+    width:100%;
+  }
+  input[type=text]:focus { outline:none; border-color:var(--accent); }
+  h1 { font-size:21px; font-weight:600; letter-spacing:-.01em; margin:0 0 6px; }
+  .sub { color:var(--dim); font-size:14px; margin:0 0 26px; }
+  .fade-in { animation:fadein .5s ease-out; }
+  @keyframes fadein { from {opacity:0; transform:translateY(6px);} to {opacity:1;} }
+"""
+
+
+ONBOARD_PAGE = r"""
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Recovery Card — welcome</title>
+<style>
+""" + _BASE_CSS + r"""
+  /* One screen at a time, one primary action, nothing auto-advances. */
+  .screen { display:none; }
+  .screen.here { display:block; animation:fadein .5s ease-out; }
+  .actions { margin-top:34px; display:flex; gap:12px; align-items:center; }
+  .back { color:var(--dim); font-size:13.5px; background:none; border:none;
+          cursor:pointer; padding:10px 6px; }
+  .back:hover { color:var(--text); }
+
+  .privacy {
+    margin:22px 0; padding:16px 20px; border-radius:12px;
+    background:var(--panel); border:1px solid var(--line); font-size:14.5px;
+  }
+  .checks { margin-top:14px; }
+  .check { display:flex; gap:10px; padding:7px 0; font-size:13.5px;
+           color:var(--dim); align-items:baseline; }
+  .check b { color:var(--text); font-weight:500; }
+  .dot { width:8px; height:8px; border-radius:50%; flex:none;
+         position:relative; top:-1px; }
+  .dot.ok { background:var(--good); }
+  .dot.no { background:var(--bad); }
+  .dot.wait { background:var(--dim); }
+
+  .prop {
+    display:flex; gap:12px; align-items:center; padding:14px 16px;
+    border:1px solid var(--line); border-radius:12px; margin-bottom:10px;
+    background:var(--panel);
+  }
+  .prop input[type=text] { border:none; background:transparent; padding:2px 0;
+                           font-size:15px; }
+  .prop .ev { font-size:12.5px; color:var(--dim); margin-top:2px; }
+  .prop .keep { flex:none; }
+  .prop.ignored { opacity:.38; }
+  .thinking { color:var(--dim); font-size:14px; padding:26px 0; }
+
+  .how {
+    display:flex; justify-content:space-between; gap:8px; margin:30px 0;
+    text-align:center; font-size:13px; color:var(--dim);
+  }
+  .how .step { flex:1; padding:18px 8px; border:1px solid var(--line);
+               border-radius:12px; background:var(--panel); }
+  .how .glyph { font-size:22px; margin-bottom:8px; }
+  .how .arrow { align-self:center; color:var(--line); font-size:18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="screen here" id="s1">
+    <h1>Recovery Card holds your threads.</h1>
+    <p class="sub">When you're pulled away, it keeps the thread you were on —
+    and the point to pick it back up.</p>
+    <div class="privacy">
+      Everything stays on this Mac. Nothing is uploaded.
+      <div class="checks" id="checks">
+        <div class="check"><span class="dot wait"></span>Checking the local model…</div>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="primary" onclick="go(2)">Get started</button>
+    </div>
+  </div>
+
+  <div class="screen" id="s2">
+    <h1>What are you working on?</h1>
+    <p class="sub">One look at your screen, and it will suggest the threads it
+    sees open. Keep what's right, rename anything, ignore the rest.</p>
+    <div id="props"><div class="thinking">Looking at your screen…</div></div>
+    <div style="display:flex; gap:8px; margin-top:14px;">
+      <input type="text" id="manual" placeholder="Add a thread yourself — e.g. “Phossil launch”"
+             onkeydown="if(event.key==='Enter')addManual()">
+      <button onclick="addManual()">Add</button>
+    </div>
+    <div class="actions">
+      <button class="primary" onclick="go(3)">Keep these threads</button>
+      <button class="quiet" onclick="go(3)">Skip for now</button>
+      <button class="back" onclick="go(1)">‹ Back</button>
+    </div>
+  </div>
+
+  <div class="screen" id="s3">
+    <h1>Anyone or anything tied to these?</h1>
+    <p class="sub">Optional. A person you're waiting on, a doc that matters.
+    It helps the cards name things precisely.</p>
+    <div id="peopledocs"></div>
+    <div class="actions">
+      <button class="primary" onclick="go(4)">Continue</button>
+      <button class="primary" style="background:var(--panel);color:var(--text);border-color:var(--line)"
+              onclick="go(4)">Skip for now</button>
+      <button class="back" onclick="go(2)">‹ Back</button>
+    </div>
+  </div>
+
+  <div class="screen" id="s4">
+    <h1>How it works</h1>
+    <p class="sub">That's all it needs.</p>
+    <div class="how">
+      <div class="step"><div class="glyph">●</div>You work.<br>It watches quietly.</div>
+      <div class="arrow">→</div>
+      <div class="step"><div class="glyph">◐</div>You get pulled away.<br>No action needed.</div>
+      <div class="arrow">→</div>
+      <div class="step"><div class="glyph">◉</div>You come back.<br>Your threads are waiting.</div>
+    </div>
+    <div class="actions">
+      <button class="primary" onclick="finish()">Start</button>
+      <button class="back" onclick="go(3)">‹ Back</button>
+    </div>
+  </div>
+
+</div>
+<script>
+function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+let props = [];   // {name, evidence, keep}
+let proposed = false;
+
+function go(n) {
+  document.querySelectorAll(".screen").forEach(s => s.classList.remove("here"));
+  document.getElementById("s" + n).classList.add("here");
+  if (n === 2 && !proposed) { proposed = true; propose(); }
+  if (n === 3) drawPeopleDocs();
+}
+
+async function preflight() {
+  let d; try { d = await (await fetch("/api/preflight")).json(); } catch(e) { return; }
+  let s; try { s = await (await fetch("/api/state")).json(); } catch(e) { s = {}; }
+  const rows = [];
+  const issues = d.issues || [];
+  const bad = t => issues.find(i => i.problem.toLowerCase().includes(t));
+  rows.push(row(!bad("ollama"), "Local model engine", bad("ollama")));
+  rows.push(row(!bad("model"), "Gemma 4 on this Mac", bad("model")));
+  rows.push(row(!bad("screenshot") && !bad("blank"), "Screen access",
+                bad("screenshot") || bad("blank")));
+  rows.push(`<div class="check"><span class="dot ${s.network === "OFFLINE" ? "ok" : "ok"}"></span>
+     <span>Network: <b>${s.network || "?"}</b> — works either way; nothing is sent anywhere.</span></div>`);
+  document.getElementById("checks").innerHTML = rows.join("");
+  function row(ok, label, issue) {
+    return `<div class="check"><span class="dot ${ok ? "ok" : "no"}"></span>
+      <span><b>${label}</b>${ok ? "" : " — " + esc(issue ? issue.fix : "")}</span></div>`;
+  }
+}
+
+async function propose() {
+  let d;
+  try { d = await (await fetch("/api/onboard/propose", {method:"POST"})).json(); }
+  catch (e) { d = {ok:false, error:"Could not reach the local engine."}; }
+  const host = document.getElementById("props");
+  if (!d.ok) {
+    host.innerHTML = `<div class="thinking">It couldn't look right now
+      (${esc(d.error || "")}). You can add threads yourself below.</div>`;
+    return;
+  }
+  props = (d.proposals || []).map(p => ({...p, keep: true}));
+  drawProps();
+}
+
+function drawProps() {
+  const host = document.getElementById("props");
+  if (!props.length) {
+    host.innerHTML = `<div class="thinking">Nothing jumped out. Add your
+      threads below — a few words each is plenty.</div>`;
+    return;
+  }
+  host.innerHTML = props.map((p, i) => `
+    <div class="prop ${p.keep ? "" : "ignored"}">
+      <div style="flex:1">
+        <input type="text" value="${esc(p.name)}" onchange="props[${i}].name=this.value">
+        <div class="ev">${esc(p.evidence || "")}</div>
+      </div>
+      <button class="keep" onclick="props[${i}].keep=!props[${i}].keep; drawProps()">
+        ${p.keep ? "Keeping" : "Ignored"}</button>
+    </div>`).join("");
+}
+
+function addManual() {
+  const i = document.getElementById("manual");
+  if (!i.value.trim()) return;
+  props.push({name: i.value.trim(), evidence: "added by you", keep: true});
+  i.value = "";
+  drawProps();
+}
+
+function drawPeopleDocs() {
+  const kept = props.filter(p => p.keep);
+  const host = document.getElementById("peopledocs");
+  if (!kept.length) {
+    host.innerHTML = `<div class="thinking">No threads yet — that's fine.
+      They'll form as you work.</div>`;
+    return;
+  }
+  host.innerHTML = kept.map((p, i) => `
+    <div class="prop"><div style="flex:1">
+      <div>${esc(p.name)}</div>
+      <input type="text" placeholder="A person or doc tied to this (optional)"
+             onchange="props[${i}].anchor=this.value" style="margin-top:6px">
+    </div></div>`).join("");
+}
+
+async function finish() {
+  const kept = props.filter(p => p.keep).map(p => ({
+    name: p.name, anchors: p.anchor ? [p.anchor] : []}));
+  await fetch("/api/onboard/complete", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({threads: kept})});
+  location.href = "/";
+}
+
+preflight();
+setInterval(preflight, 4000);
+</script>
+</body>
+</html>
+"""
+
+
+BOARD_PAGE = r"""
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Recovery Card</title>
+<style>
+""" + _BASE_CSS + r"""
+  /* The board: same thing in the same place, every session.
+     Order, top to bottom: situation, active thread, other threads, card. */
+  .headline { font-size:20px; font-weight:500; line-height:1.45;
+              letter-spacing:-.01em; margin:0 0 20px; }
+  .quietrow { display:flex; gap:16px; align-items:center; font-size:12.5px;
+              color:var(--dim); margin-bottom:26px; flex-wrap:wrap; }
+  .quietrow .beat { display:inline-block; width:7px; height:7px;
+      border-radius:50%; background:var(--good); margin-right:5px;
+      animation:pulse 3s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+  .off { color:var(--bad); font-weight:600; }
+
+  .thread {
+    background:var(--panel); border:1px solid var(--line);
+    border-radius:14px; padding:18px 22px; margin-bottom:10px;
+  }
+  .thread.active { border-color:rgba(122,162,247,.5); padding:22px; }
+  .thread .name { font-weight:600; font-size:15.5px; }
+  .thread.active .name { font-size:18px; }
+  .thread .rp { color:var(--dim); font-size:13.5px; margin-top:4px; }
+  .thread.active .rp { font-size:14.5px; color:var(--text); opacity:.85; }
+  .thread .tag { font-size:10.5px; letter-spacing:.1em; color:var(--dim);
+                 font-weight:600; }
+  .thread .tag.act { color:var(--accent); }
+
+  .emergent {
+    border:1px dashed rgba(224,175,104,.55); border-radius:14px;
+    padding:16px 20px; margin:14px 0; background:rgba(224,175,104,.05);
+  }
+  .emergent .q { font-size:14.5px; margin-bottom:10px; }
+  .emergent .sample { font-size:12.5px; color:var(--dim); margin-bottom:10px; }
+  .emergent .row { display:flex; gap:8px; }
+
+  .park { display:flex; gap:8px; margin:22px 0; }
+  .controls { display:flex; gap:10px; margin-bottom:8px; }
+  h2.sect { font-size:11px; letter-spacing:.14em; color:var(--dim);
+            font-weight:600; margin:26px 0 10px; }
+  a.engine { color:var(--dim); font-size:11.5px; text-decoration:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="headline" id="headline">…</p>
+
+  <div class="quietrow" id="quiet"></div>
+
+  <div class="controls">
+    <button id="btn-cap" onclick="toggleCapture()">Start watching</button>
+    <button class="primary" onclick="imBack()">I'm back</button>
+  </div>
+
+  <div class="park">
+    <input type="text" id="park"
+           placeholder="Park it — one line about where you're leaving off"
+           onkeydown="if(event.key==='Enter')park()">
+    <button onclick="park()">Save</button>
+  </div>
+
+  <div id="emergent-slot"></div>
+
+  <h2 class="sect" id="threads-title" style="display:none">YOUR THREADS</h2>
+  <div id="threads"></div>
+
+  <h2 class="sect" id="card-title" style="display:none">THE CARD</h2>
+  <div id="card-slot"></div>
+
+  <div class="scoring" id="scoring" style="margin-top:18px"></div>
+
+  <p style="margin-top:40px"><a class="engine" href="/engine">engine room</a></p>
+</div>
+<script>
+function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+let running = false;
+
+async function tickBoard() {
+  let b; try { b = await (await fetch("/api/board")).json(); } catch(e){ return; }
+  document.getElementById("headline").textContent = b.headline;
+
+  const host = document.getElementById("threads");
+  const threads = (b.threads || []).filter(t => t.status !== "ambient");
+  document.getElementById("threads-title").style.display =
+    threads.length ? "" : "none";
+  host.innerHTML = threads.map(t => {
+    const act = t.id === b.active;
+    return `<div class="thread ${act ? "active" : ""}">
+      <div class="tag ${act ? "act" : ""}">${act ? "ACTIVE NOW" :
+        (t.origin === "emergent" ? "EMERGENT · HELD" : "HELD")}</div>
+      <div class="name">${esc(t.name)}</div>
+      <div class="rp">${esc(t.return_point) ||
+        "No return-point yet — one appears after the first card."}</div>
+    </div>`;
+  }).join("");
+
+  const em = document.getElementById("emergent-slot");
+  if (b.emergent) {
+    if (!em.dataset.shown) {
+      em.dataset.shown = "1";
+      em.innerHTML = `<div class="emergent">
+        <div class="q">This looks like a new thread forming. Keep it?</div>
+        <div class="sample">${esc(b.emergent.sample_text)}</div>
+        <div class="row">
+          <input type="text" id="emname" placeholder="Name it — e.g. “Speaker repair”"
+                 onkeydown="if(event.key==='Enter')keepEmergent()">
+          <button class="primary" onclick="keepEmergent()">Keep</button>
+          <button class="quiet" onclick="dismissEmergent()">Leave it</button>
+        </div></div>`;
+    }
+  } else { em.innerHTML = ""; em.dataset.shown = ""; }
+}
+
+async function keepEmergent() {
+  const name = document.getElementById("emname").value.trim();
+  if (!name) return;
+  await fetch("/api/thread/confirm_emergent", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({name})});
+  document.getElementById("emergent-slot").dataset.shown = "";
+  tickBoard();
+}
+async function dismissEmergent() {
+  await fetch("/api/thread/dismiss_emergent", {method:"POST"});
+  document.getElementById("emergent-slot").dataset.shown = "";
+  tickBoard();
+}
+
+async function tick() {
+  let d; try { d = await (await fetch("/api/state")).json(); } catch(e){ return; }
+  running = d.running;
+  document.getElementById("btn-cap").textContent =
+    running ? "Stop watching" : "Start watching";
+  const q = [];
+  if (d.mode === "ACTIVE") q.push(`<span><span class="beat"></span>watching · ${d.frames_kept} frames</span>`);
+  else if (d.mode === "AWAY") q.push(`<span>away ${Math.round(d.idle_seconds)}s</span>`);
+  else if (d.mode === "RECONSTRUCTING") q.push(`<span>reading your screens… ${d.reconstructing_for ?? 0}s</span>`);
+  else if (d.mode === "CARD_READY") q.push(`<span>card ready</span>`);
+  else q.push(`<span>not watching</span>`);
+  q.push(`<span>${esc(d.model)}</span>`);
+  q.push(`<span class="${d.network === "OFFLINE" ? "off" : ""}">${d.network.toLowerCase()}</span>`);
+  q.push(`<span>last card ${esc(d.last_card)}</span>`);
+  document.getElementById("quiet").innerHTML = q.join(" · ");
+
+  document.getElementById("card-title").style.display = d.card ? "" : "none";
+  renderCard(d.card);
+}
+
+async function toggleCapture() {
+  await fetch("/api/capture/" + (running ? "stop" : "start"), {method:"POST"});
+  setTimeout(tick, 400);
+}
+async function imBack() {
+  const d = await (await fetch("/api/state")).json();
+  if (d.card && d.mode === "CARD_READY") return;
+  await fetch("/api/generate", {method:"POST"});
+  tick();
+}
+async function park() {
+  const i = document.getElementById("park");
+  if (!i.value.trim()) return;
+  await fetch("/api/park", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({text:i.value})});
+  i.value = "";
+  i.placeholder = "Parked. It will be treated as truth on the next card.";
+}
+</script>
+"""
+
+
+# Card renderer + verdict taps + scoring, shared into the board page. The
+# engine-room page keeps its own older copy; the board is the canonical
+# surface now.
+_CARD_ASSETS = r"""
+<style>
+  .card { position:relative; background:var(--panel); border:1px solid var(--line);
+          border-radius:14px; padding:26px; margin-bottom:18px; }
+  .card h2 { font-size:11px; letter-spacing:.14em; color:var(--dim);
+             font-weight:600; margin:0 0 8px; display:flex; align-items:center; gap:8px; }
+  .goal { font-size:21px; font-weight:500; line-height:1.35; margin:0 0 10px;
+          letter-spacing:-.01em; }
+  .reason { color:var(--dim); margin:0; }
+  .sec { margin-top:22px; }
+  .next { font-size:16.5px; margin:0; }
+  ul { margin:0; padding-left:20px; } li { margin:3px 0; }
+  .said { margin-top:20px; padding:12px 16px; border-left:2px solid var(--accent);
+          background:rgba(122,162,247,.07); font-style:italic; }
+  .meta { margin-top:22px; padding-top:14px; border-top:1px solid var(--line);
+          font-size:12.5px; color:var(--dim); }
+  .flag { display:inline-block; padding:3px 9px; border-radius:5px; font-size:11px;
+          font-weight:600; letter-spacing:.06em; margin-bottom:12px; }
+  .flag.reduced { background:rgba(224,175,104,.16); color:var(--warn); }
+  .flag.failed { background:rgba(247,118,142,.14); color:var(--bad); }
+  .taps { margin-left:auto; display:flex; gap:3px; opacity:.25; transition:opacity .2s; }
+  .card:hover .taps { opacity:.7; } .taps:hover { opacity:1 !important; }
+  .taps button { padding:1px 7px; font-size:11px; border-radius:5px;
+                 background:transparent; border:1px solid var(--line); color:var(--dim); }
+  .taps button.y.on { background:var(--good); border-color:var(--good); color:#0f1115; }
+  .taps button.n.on { background:var(--bad); border-color:var(--bad); color:#0f1115; }
+  .fixbox { display:flex; gap:6px; margin:8px 0 2px; }
+  .fixbox input { flex:1; font:inherit; font-size:13px; padding:7px 11px;
+                  border-radius:7px; border:1px solid var(--accent);
+                  background:var(--bg); color:var(--text); }
+  .fixed-note { margin:8px 0 2px; font-size:12.5px; color:var(--good); }
+  .scoring { background:var(--panel); border:1px solid var(--line);
+             border-radius:14px; padding:20px 22px; }
+  .scoring h2 { font-size:11px; letter-spacing:.14em; color:var(--dim);
+                font-weight:600; margin:0 0 12px; }
+  .tally { font-size:14px; margin:0 0 4px; }
+  .tally .ok { color:var(--good); } .tally .mid { color:var(--warn); }
+  .tally .bad { color:var(--bad); }
+  .truth { margin:14px 0 6px; padding:10px 14px; border-left:2px solid var(--good);
+           background:rgba(123,207,158,.08); font-style:italic; font-size:13.5px; }
+  .judge-row { display:flex; align-items:flex-start; gap:10px; padding:9px 0;
+               border-bottom:1px solid var(--line); font-size:13.5px; }
+  .judge-row:last-child { border-bottom:none; }
+  .judge-row .lbl { width:96px; flex:none; color:var(--dim); font-size:12px;
+                    padding-top:3px; }
+  .judge-row .val { flex:1; }
+  .judge-row .btns { flex:none; display:flex; gap:4px; }
+  .judge-row button { padding:3px 10px; font-size:12px; border-radius:6px; min-width:30px; }
+  .judge-row button.on-y { background:var(--good); border-color:var(--good); color:#0f1115; }
+  .judge-row button.on-n { background:var(--bad); border-color:var(--bad); color:#0f1115; }
+  .judge-row button.on-na { background:var(--dim); border-color:var(--dim); color:#0f1115; }
+</style>
+<script>
+let verdicts = {};
+let lastCardSig = null;
+
+function taps(file, field) {
+  const v = verdicts[file + ":" + field];
+  return `<span class="taps">
+    <button class="y ${v === true ? "on" : ""}"
+            onclick="tap('${file}','${field}',true)" title="Right">✓</button>
+    <button class="n ${v === false ? "on" : ""}"
+            onclick="tap('${file}','${field}',false)" title="Wrong">✗</button>
+  </span>`;
+}
+async function tap(file, field, value) {
+  verdicts[file + ":" + field] = value;
+  lastCardSig = null;
+  await fetch("/api/verdict", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({file, field, value})});
+  tick(); drawScoring();
+  if (value === false) setTimeout(() => showFix(file, field), 60);
+}
+function showFix(file, field) {
+  const host = document.getElementById("fix-" + field);
+  if (!host) return;
+  host.innerHTML = `<div class="fixbox">
+    <input id="fixin-${field}" placeholder="What were you actually doing?"
+           onkeydown="if(event.key==='Enter')saveFix('${file}','${field}')">
+    <button onclick="saveFix('${file}','${field}')">Save</button></div>`;
+  const i = document.getElementById("fixin-" + field);
+  if (i) i.focus();
+}
+async function saveFix(file, field) {
+  const i = document.getElementById("fixin-" + field);
+  const text = i ? i.value.trim() : "";
+  if (!text) return;
+  await fetch("/api/verdict", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({file, field, value:false, correction:text})});
+  const host = document.getElementById("fix-" + field);
+  if (host) host.innerHTML =
+    `<div class="fixed-note">Saved. Later cards will treat that as truth.</div>`;
+  drawScoring();
+}
+
+function renderCard(c) {
+  const slot = document.getElementById("card-slot");
+  if (!c) { slot.innerHTML = ""; lastCardSig = null; return; }
+  const sig = JSON.stringify([c._file, verdicts, (c.corrections || []).length]);
+  if (sig === lastCardSig) return;
+  lastCardSig = sig;
+
+  let flag = "";
+  if (c.reduced_model) flag += '<div class="flag reduced">REDUCED MODEL — low confidence</div> ';
+  if (c.fail_closed) flag += '<div class="flag failed">NOT ENOUGH SIGNAL</div>';
+  const loops = (c.open_loops || []).map(l => "<li>" + esc(l) + "</li>").join("");
+  const f = c._file;
+
+  slot.innerHTML = `
+    <div class="card">
+      ${flag}
+      ${c.thread ? `<div class="flag" style="background:rgba(122,162,247,.14);color:var(--accent)">${esc(c.thread)}</div>` : ""}
+      <h2>PICK UP HERE ${taps(f, "goal")}</h2>
+      <p class="goal">${esc(c.goal)}</p>
+      <div id="fix-goal"></div>
+      <h2 style="margin-top:18px">WHY ${taps(f, "reasoning")}</h2>
+      <p class="reason">${esc(c.reasoning)}</p>
+      <div id="fix-reasoning"></div>
+      <div class="sec"><h2>NEXT STEP ${taps(f, "next_action")}</h2>
+        <p class="next">${esc(c.next_action)}</p><div id="fix-next_action"></div></div>
+      ${loops ? `<div class="sec"><h2>OPEN LOOPS ${taps(f, "open_loops")}</h2>
+        <ul>${loops}</ul><div id="fix-open_loops"></div></div>` : ""}
+      ${c.park_note ? `<div class="said">You said: “${esc(c.park_note)}”</div>` : ""}
+      ${(c.corrections || []).map(x =>
+        `<div class="said">You corrected: “${esc(x.text)}”</div>`).join("")}
+      <div class="meta">
+        confidence ${esc(c.confidence)} · ${esc(c.model || "")}
+        ${c.trigger ? "· triggered by " + esc(c.trigger) : ""}<br>
+        evidence: ${esc(c.evidence)}
+      </div>
+    </div>`;
+}
+
+let marks = {};
+function tallyLine(t) {
+  const cell = (ok, n) => {
+    if (!n) return null;
+    const p = 100 * ok / n;
+    const cls = p >= 70 ? "ok" : (p >= 50 ? "mid" : "bad");
+    return `<span class="${cls}">${ok}/${n}</span>`;
+  };
+  const parts = [];
+  for (const [f, v] of Object.entries(t.fields)) {
+    const c = cell(v.correct, v.judged);
+    if (c) parts.push(`${f.replace("_", " ")} <b>${c}</b>`);
+  }
+  if (!parts.length) return "";
+  return parts.join(" · ") +
+    ` · overall <b>${cell(t.overall.correct, t.overall.judged)}</b> (${t.percent}%)`;
+}
+async function drawScoring() {
+  let e; try { e = await (await fetch("/api/eval")).json(); } catch (err) { return; }
+  const el = document.getElementById("scoring");
+  if (!el) return;
+  const line = tallyLine(e.tally);
+  if (!e.next) {
+    el.innerHTML = e.tally.overall.judged
+      ? `<h2>ACCURACY</h2><p class="tally">${line}</p>`
+      : `<h2>ACCURACY</h2><p class="tally" style="color:var(--dim);font-size:13px">
+         Park a note before you step away, and the card that follows can be
+         scored against your own words.</p>`;
+    return;
+  }
+  const n = e.next;
+  if (marks.__file !== n.file) marks = {__file: n.file};
+  const row = (f, val) => {
+    const m = marks[f];
+    return `<div class="judge-row"><div class="lbl">${f.replace("_", " ")}</div>
+      <div class="val">${esc(Array.isArray(val) ? val.join(" · ") : val) || "<i>(none)</i>"}</div>
+      <div class="btns">
+        <button class="${m===true?"on-y":""}" onclick="mark('${f}',true)">✓</button>
+        <button class="${m===false?"on-n":""}" onclick="mark('${f}',false)">✗</button>
+        <button class="${m===null?"on-na":""}" onclick="mark('${f}',null)">–</button>
+      </div></div>`;
+  };
+  el.innerHTML = `<h2>ACCURACY</h2>
+    ${line ? `<p class="tally">${line}</p>` : ""}
+    <p class="tally" style="color:var(--dim);font-size:12.5px">
+      ${e.pending} card(s) awaiting your judgement</p>
+    <div class="truth">You said: “${esc(n.park_note)}”</div>
+    ${row("goal", n.goal)} ${row("reasoning", n.reasoning)}
+    ${row("next_action", n.next_action)} ${row("open_loops", n.open_loops)}
+    <div style="margin-top:14px;display:flex;gap:8px;align-items:center">
+      <button class="primary" onclick="saveMarks()">Save judgement</button>
+      <span style="font-size:12px;color:var(--dim)">✓ correct · ✗ wrong · – not applicable</span>
+    </div>`;
+}
+function mark(field, value) { marks[field] = value; drawScoring(); }
+async function saveMarks() {
+  const file = marks.__file;
+  if (!file) return;
+  const body = {file, marks: {}};
+  for (const f of ["goal", "reasoning", "next_action", "open_loops"])
+    body.marks[f] = (f in marks) ? marks[f] : null;
+  await fetch("/api/eval/mark", {method:"POST",
+    headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  marks = {};
+  drawScoring();
+}
+
+window.addEventListener("focus", () => { tick(); tickBoard(); });
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) { tick(); tickBoard(); }});
+tick(); tickBoard(); drawScoring();
+setInterval(tick, 2000);
+setInterval(tickBoard, 3000);
+setInterval(drawScoring, 6000);
+</script>
+</body>
+</html>
+"""
+
+BOARD_PAGE = BOARD_PAGE + _CARD_ASSETS
 
 
 OVERLAY_PAGE = r"""

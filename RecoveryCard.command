@@ -86,13 +86,14 @@ for _ in $(seq 1 25); do
 done
 
 if curl -s -o /dev/null --max-time 2 "http://localhost:$PORT/"; then
-  say "Running."
-  say "Menu bar:  look for the bone"
-  say "Full UI:   http://localhost:$PORT"
+  say "Running. Opening the app window."
+  say "Menu bar: look for the bone."
   say "Idle threshold: ${IDLE}s"
-  echo
-  say "If you cannot see the bone, your menu bar is full — macOS hides"
-  say "overflow behind the notch. The app is still running; use the URL."
+
+  # The native window IS the interface. Browser is emergency-only:
+  # http://localhost:$PORT/engine
+  nohup "$PY" window.py "http://localhost:$PORT" \
+    > "$LOGDIR/window.log" 2>&1 &
   echo
   say "To stop:   ./RecoveryCard.command stop"
 else
