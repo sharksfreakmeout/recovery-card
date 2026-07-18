@@ -195,6 +195,27 @@ def frame_text(meta):
     return " · ".join(str(p) for p in parts if p)[:2000]
 
 
+_EDITOR_APPS = {"Cursor", "Code", "Visual Studio Code", "Zed", "Sublime Text",
+                "Xcode", "IntelliJ IDEA", "PyCharm"}
+
+
+def editor_folder_token(meta):
+    """The project/folder name from an editor's window title.
+
+    Editors title windows "file — folder" (or just "folder"). That folder
+    name is the strongest anchor there is for telling two editor windows
+    apart - "capture.py — Gemma Hackathon" belongs to a different thread
+    than "Gate_Report.md — phossil-production-app".
+    """
+    if meta.get("app") not in _EDITOR_APPS:
+        return ""
+    title = meta.get("window_title") or ""
+    for sep in (" — ", " - ", " – "):
+        if sep in title:
+            return title.rsplit(sep, 1)[-1].strip().lower()
+    return title.strip().lower()
+
+
 def engaged(meta):
     """Was the user actually doing something in this frame?
 
@@ -231,16 +252,32 @@ def classify(g, meta, hint_tid=None):
     def live(t):
         return t.get("status") != "archived"
 
-    # Tier 2 - metadata anchors. A direct hit settles it.
-    best_tid, best_hits = None, 0
-    for tid, t in g["threads"].items():
-        if not live(t):
+    # Tier 2 - metadata anchors, FRONTMOST FIRST. window_titles lists every
+    # window, so two Cursor projects both appear in every frame's text and
+    # whichever anchor matched first used to win. The frontmost title (plus
+    # the editor's folder token and the AX tab/url) is what the person is
+    # actually looking at - it alone settles the match; the full text is
+    # only consulted when the frontmost says nothing.
+    front_parts = [meta.get("window_title") or ""]
+    ax = meta.get("ax") or {}
+    front_parts += [str(ax.get(k) or "") for k in ("tab", "url")]
+    ftok = editor_folder_token(meta)
+    if ftok:
+        front_parts.append(ftok)
+    front = " · ".join(p for p in front_parts if p).lower()
+
+    for scope, weight in ((front, 2.0), (low, 1.0)):
+        if not scope:
             continue
-        hits = sum(1 for a in t["anchors"] if a and a in low)
-        if hits > best_hits:
-            best_tid, best_hits = tid, hits
-    if best_hits > 0:
-        return best_tid, 2, float(best_hits)
+        best_tid, best_hits = None, 0
+        for tid, t in g["threads"].items():
+            if not live(t):
+                continue
+            hits = sum(1 for a in t["anchors"] if a and a in scope)
+            if hits > best_hits:
+                best_tid, best_hits = tid, hits
+        if best_hits > 0:
+            return best_tid, 2, float(best_hits) * weight
 
     # Tier 3 - semantic similarity vs running centroids.
     vec = embed(text)[0] if text else None

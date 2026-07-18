@@ -26,7 +26,8 @@ CARDS = ROOT / "cards"
 EVAL = ROOT / "eval"
 RESULTS = EVAL / "results.json"
 
-FIELDS = ["goal", "reasoning", "next_action", "open_loops"]
+FIELDS = ["goal", "reasoning", "next_action", "open_loops",
+          "right_thread"]
 
 BOLD = "\033[1m"
 DIM = "\033[2m"

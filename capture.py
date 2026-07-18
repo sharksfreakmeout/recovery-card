@@ -737,7 +737,10 @@ def main():
             pass
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        tmp = CAPTURES / f"pending_{stamp}.png"
+        # pid in the pending name: two capture processes (e.g. the live
+        # engine's and a test's) hit identical second-granularity names,
+        # and one process's rename made the other's crash mid-cycle.
+        tmp = CAPTURES / f"pending_{stamp}_{os.getpid()}.png"
 
         if not grab_screen(tmp):
             log("Screenshot failed. Check Screen Recording permission for "
@@ -856,6 +859,21 @@ def main():
                     ctx_thread = graph["threads"][tid]["name"] if tid else "—"
                     log(f"      thread: {ctx_thread} (tier {tier})  "
                         f"active: {active or '—'}")
+                    # live stream for the engine room
+                    try:
+                        lp = CAPTURES / "classify_log.jsonl"
+                        with lp.open("a") as _f:
+                            _f.write(json.dumps({
+                                "at": ctx["timestamp"],
+                                "frame": final.name,
+                                "app": ctx.get("app", ""),
+                                "thread": ctx_thread, "tier": tier,
+                                "score": score}) + "\n")
+                        if lp.stat().st_size > 200_000:
+                            lines = lp.read_text().splitlines()[-100:]
+                            lp.write_text("\n".join(lines) + "\n")
+                    except Exception:
+                        pass
                 except Exception as e:
                     log(f"      thread classify failed: {e}")
 

@@ -173,10 +173,39 @@ def main():
     # detaches the engine and process ancestry loses the stub.
     lp = ROOT / "logs" / "launch_path"
     via = lp.read_text().strip() if lp.exists() else "unknown"
-    path_desc = ("stub (PLite.app) - Screen Recording belongs to PLite"
-                 if via == "stub" else f"{via} - Screen Recording belongs "
-                 "to the terminal app")
-    check("launch path", True, path_desc, warn=False)
+
+    # Which TCC identities hold Screen Recording. The TCC database is
+    # only readable with Full Disk Access, so this degrades honestly.
+    holders = []
+    try:
+        r = subprocess.run(
+            ["sqlite3",
+             os.path.expanduser("~/Library/Application Support/"
+                                "com.apple.TCC/TCC.db"),
+             "select client from access where "
+             "service='kTCCServiceScreenCapture';"],
+            capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            holders = [h for h in r.stdout.split() if h]
+    except Exception:
+        pass
+
+    using = ("PLite.app" if via == "stub" else f"terminal-family ({via})")
+    if holders:
+        detail = f"granted to: {', '.join(holders)} · this launch uses: {using}"
+        plite_holds = any("plite" in h.lower() for h in holders)
+        mismatch = (via == "stub" and not plite_holds) or \
+                   (via != "stub")
+    else:
+        detail = (f"grant list unreadable without Full Disk Access · "
+                  f"this launch uses: {using} · capture verified live "
+                  "above, so THIS identity holds it")
+        mismatch = via != "stub"
+    check("permission identity", not mismatch, detail +
+          ("" if not mismatch else
+           " — consolidate: launch via PLite.app so one identity "
+           "(PLite) is capture-responsible going forward"),
+          warn=mismatch)
 
     print()
     if all(results):

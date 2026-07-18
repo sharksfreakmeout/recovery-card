@@ -594,6 +594,103 @@ def api_metrics():
     return jsonify(events_mod.resumptions())
 
 
+@app.route("/api/classify_log")
+def api_classify_log():
+    """The live classification stream for the engine room."""
+    p = ROOT / "captures" / "classify_log.jsonl"
+    rows = []
+    if p.exists():
+        for line in p.read_text().splitlines()[-30:]:
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                pass
+    rows.reverse()
+    return jsonify({"rows": rows})
+
+
+@app.route("/api/card/<name>/move", methods=["POST"])
+def api_card_move(name):
+    """Wrong thread? Move this card. A card-level correction:
+    sticky-authority, retro-heals everything the card produced."""
+    dest_tid = (request.json or {}).get("thread", "")
+    path = CARDS / name
+    if not re.match(r"^card_\d{8}_\d{6}\.json$", name) or not path.exists():
+        return jsonify({"ok": False, "error": "unknown card"}), 400
+    g = threads_mod.load()
+    dest = g["threads"].get(dest_tid)
+    if not dest:
+        return jsonify({"ok": False, "error": "unknown thread"}), 400
+
+    c = json.loads(path.read_text())
+    old_name = c.get("thread", "")
+    c["thread"] = dest["name"]
+    c["thread_moved"] = {"from": old_name, "to": dest["name"],
+                         "at": datetime.now().isoformat(timespec="seconds")}
+    path.write_text(json.dumps(c, indent=2))
+
+    # Sticky correction: the card's own text reshapes the destination.
+    vec = threads_mod.embed(
+        f'{c.get("goal", "")} {c.get("evidence", "")}')[0]
+    threads_mod.feed_embedding(g, dest_tid, vec)
+    threads_mod.add_history(g, dest_tid, "correction",
+                            f"card moved here: {c.get('goal', '')}")
+
+    # Retro-heal: nodes this card created follow it; the old thread's
+    # return-point heals if it came from this card.
+    for n in g["nodes"]:
+        if name in (n.get("sources") or []):
+            n["thread"] = dest_tid
+            n["sticky"] = True
+    old = next((t for t in g["threads"].values()
+                if t["name"] == old_name), None)
+    if old and old.get("return_point") == c.get("next_action"):
+        old["return_point"] = ""
+        for h in reversed(old.get("history", [])):
+            if h["kind"] in ("park", "composed", "card") \
+                    and c.get("goal", "") not in h["text"]:
+                old["return_point"] = h["text"][:120]
+                break
+    threads_mod.touch(g, dest_tid, return_point=c.get("next_action"))
+    threads_mod.save(g)
+
+    # Ground truth for the eval store.
+    try:
+        p = ROOT / "eval" / "map_corrections.json"
+        rows = json.loads(p.read_text()) if p.exists() else []
+        rows.append({"action": "move_card", "card": name,
+                     "from": old_name, "to": dest["name"],
+                     "at": datetime.now().isoformat(timespec="seconds")})
+        p.write_text(json.dumps(rows[-200:], indent=1))
+    except Exception:
+        pass
+    return jsonify({"ok": True})
+
+
+@app.route("/api/card/<name>/done", methods=["POST"])
+def api_card_done(name):
+    """The Done check on a next step. Marks it, strikes matching open
+    loops, logs. Executes nothing."""
+    path = CARDS / name
+    if not re.match(r"^card_\d{8}_\d{6}\.json$", name) or not path.exists():
+        return jsonify({"ok": False, "error": "unknown card"}), 400
+    c = json.loads(path.read_text())
+    c["next_done"] = True
+    na = (c.get("next_action") or "").lower()
+    c["loops_done"] = [l for l in c.get("open_loops", [])
+                       if l.lower() in na or na in l.lower()]
+    path.write_text(json.dumps(c, indent=2))
+    events_mod.log_event("next_done", card=name)
+    g = threads_mod.load()
+    tid = next((t["id"] for t in g["threads"].values()
+                if t["name"] == c.get("thread")), None)
+    if tid:
+        threads_mod.add_history(g, tid, "done",
+                                f"done: {c.get('next_action', '')}")
+        threads_mod.save(g)
+    return jsonify({"ok": True})
+
+
 # --- Trust dashboard API ---------------------------------------------------
 # Contract: everything here is read live from the real files on disk when
 # the request arrives. No cached claims. Every control is real.
@@ -1009,6 +1106,7 @@ def api_eval():
             "reasoning": c.get("reasoning", ""),
             "next_action": c.get("next_action", ""),
             "open_loops": c.get("open_loops", []),
+            "thread": c.get("thread", ""),
         }
 
     return jsonify({
@@ -1329,6 +1427,13 @@ PAGE = r"""
     <div id="metrics" style="font-size:13px;color:var(--dim)">no resumptions
       measured yet</div>
   </div>
+
+  <div class="scoring" style="margin-top:18px">
+    <h2 style="font-size:11px;letter-spacing:.14em;color:var(--dim);
+               font-weight:600;margin:0 0 10px">CLASSIFICATION STREAM</h2>
+    <div id="cstream" style="font-size:12.5px;color:var(--dim);
+         font-variant-numeric:tabular-nums"></div>
+  </div>
 </div>
 
 <script>
@@ -1346,6 +1451,18 @@ async function drawMetrics() {
 }
 setInterval(drawMetrics, 5000);
 drawMetrics();
+
+async function drawStream() {
+  let d; try { d = await (await fetch("/api/classify_log")).json(); }
+  catch(e){ return; }
+  document.getElementById("cstream").innerHTML = (d.rows || []).map(r =>
+    `${esc((r.at||"").slice(11,19))}  ${esc(r.app).padEnd(14)} → ` +
+    `<b style="color:var(--text)">${esc(r.thread)}</b> ` +
+    `<span style="opacity:.6">tier ${r.tier} · ${r.score}</span>`
+  ).join("<br>") || "no classifications yet";
+}
+setInterval(drawStream, 4000);
+drawStream();
 
 function esc(s) {
   return (s || "").replace(/[&<>"]/g, c =>
@@ -2377,6 +2494,7 @@ async function drawScoring() {
     <div class="truth">You said: “${esc(n.park_note)}”</div>
     ${row("goal", n.goal)} ${row("reasoning", n.reasoning)}
     ${row("next_action", n.next_action)} ${row("open_loops", n.open_loops)}
+    ${row("right_thread", n.thread || "(no thread)")}
     <div style="margin-top:14px;display:flex;gap:8px;align-items:center">
       <button class="primary" onclick="saveMarks()">Save judgement</button>
       <span style="font-size:12px;color:var(--dim)">✓ correct · ✗ wrong · – not applicable</span>
@@ -3394,7 +3512,8 @@ async function draw() {
       <h2 style="margin-top:16px">WHY ${taps(f, "reasoning")}</h2>
       <p class="reason">${esc(c.reasoning)}</p><div id="fix-reasoning"></div>
       <div class="sec"><h2 style="color:#e0af68">NEXT STEP ${taps(f, "next_action")}</h2>
-        <p class="next">${esc(c.next_action)}</p><div id="fix-next_action"></div></div>
+        <p class="next" style="${c.next_done ? "text-decoration:line-through;opacity:.55" : ""}">${esc(c.next_action)}</p>
+        <div id="next-afford"></div><div id="fix-next_action"></div></div>
       ${loops?`<div class="sec"><h2>OPEN LOOPS ${taps(f, "open_loops")}</h2>
         <ul>${loops}</ul><div id="fix-open_loops"></div></div>`:""}
       ${c.park_note?`<div class="said">You said: “${esc(c.park_note)}”</div>`:""}
